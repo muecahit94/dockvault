@@ -15,8 +15,11 @@ Automatically discover running containers, Compose stacks, and named volumes—b
   <a href="https://github.com/muecahit94/dockvault/releases/latest">
     <img src="https://img.shields.io/github/v/release/muecahit94/dockvault?label=version&color=007ec6" alt="Latest Release" />
   </a>
-  <a href="https://github.com/muecahit94/dockvault/pkgs/container/dockvault">
-    <img src="https://ghcr-badge.egpl.dev/muecahit94/dockvault/size?label=size&color=007ec6" alt="GHCR Image Size" />
+  <a href="https://hub.docker.com/r/muecahit/dockvault">
+    <img src="https://img.shields.io/docker/image-size/muecahit/dockvault/latest?label=size&color=007ec6" alt="Docker Image Size" />
+  </a>
+  <a href="https://hub.docker.com/r/muecahit/dockvault">
+    <img src="https://img.shields.io/docker/pulls/muecahit/dockvault?logo=docker&label=pulls&color=007ec6" alt="Docker Hub Pulls" />
   </a>
   <a href="https://github.com/muecahit94/dockvault/pkgs/container/dockvault">
     <img src="https://img.shields.io/badge/ghcr.io-linux%2Famd64%20%7C%20arm64-007ec6?logo=github" alt="GHCR Platforms" />
@@ -80,7 +83,7 @@ Create a `docker-compose.yaml` file and start DockVault:
 ```yaml
 services:
   dockvault:
-    image: ghcr.io/muecahit94/dockvault:latest
+    image: muecahit/dockvault:latest # or ghcr.io/muecahit94/dockvault:latest
     container_name: dockvault
     restart: unless-stopped
     ports:
