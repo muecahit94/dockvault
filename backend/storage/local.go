@@ -126,7 +126,7 @@ func (d *LocalDriver) List(_ context.Context) ([]RemoteObject, error) {
 			continue
 		}
 		name := entry.Name()
-		if !strings.HasSuffix(name, ".tar.gz") && !strings.HasSuffix(name, ".tar.gz.enc") {
+		if !IsBackupArchiveName(name) {
 			continue
 		}
 		info, err := entry.Info()

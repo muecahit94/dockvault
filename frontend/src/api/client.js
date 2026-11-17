@@ -98,17 +98,32 @@ export const api = {
     request(`/backups/${id}/verify`, {
       method: 'POST',
     }),
-  restoreBackup: (id, pauseContainer = true) =>
-    request(`/backups/${id}/restore`, {
+  restoreBackup: (id, options = true) => {
+    const payload =
+      typeof options === 'boolean'
+        ? { pauseContainer: options }
+        : {
+            pauseContainer: options?.pauseContainer ?? true,
+            targetVolumeName: options?.targetVolumeName || '',
+            preRestoreBackup: Boolean(options?.preRestoreBackup),
+          }
+    return request(`/backups/${id}/restore`, {
       method: 'POST',
-      body: JSON.stringify({ pauseContainer }),
-    }),
+      body: JSON.stringify(payload),
+    })
+  },
+  getBackupProgress: (id) => request(`/backups/${id}/progress`),
+  backupEventsUrl: () => `${API_BASE}/backups/events`,
   downloadBackupUrl: (id, raw = false) =>
     `${API_BASE}/backups/${id}/download${raw ? '?raw=true' : ''}`,
   extractBackupFileUrl: (id, path) =>
     `${API_BASE}/backups/${id}/file?path=${encodeURIComponent(path)}`,
 
   getSchedules: () => request('/schedules'),
+  syncGitOpsSchedules: () =>
+    request('/schedules/sync-labels', {
+      method: 'POST',
+    }),
   createSchedule: (payload) =>
     request('/schedules', {
       method: 'POST',
@@ -230,6 +245,11 @@ export function formatBytes(bytes) {
   const idx = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1)
   const val = bytes / Math.pow(1024, idx)
   return `${val >= 10 || idx === 0 ? val.toFixed(1) : val.toFixed(2)} ${units[idx]}`
+}
+
+export function formatBytesPerSec(bps) {
+  if (!bps || bps <= 0) return '—'
+  return `${formatBytes(bps)}/s`
 }
 
 export function formatDuration(ms) {

@@ -1,6 +1,7 @@
 package docker
 
 import (
+	"archive/tar"
 	"bytes"
 	"context"
 	"crypto/sha256"
@@ -19,6 +20,7 @@ import (
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/filters"
 	"github.com/docker/docker/api/types/image"
+	"github.com/docker/docker/api/types/volume"
 	"github.com/docker/docker/pkg/stdcopy"
 	dvcrypto "github.com/muecahit94/dockvault/crypto"
 	"github.com/muecahit94/dockvault/models"
@@ -39,7 +41,10 @@ type BackupRequest struct {
 	SelectedMounts     []string
 	PreCommand         string
 	PostCommand        string
-	Trigger            string // "manual" or "scheduled"
+	ExcludePatterns    []string
+	Compression        string // "gzip" or "zstd"
+	DBHotDump          bool
+	Trigger            string // "manual", "scheduled", or "pre-restore"
 	ScheduleID         *uint
 	RetentionPolicy    string // "count" or "gfs"
 	RetentionCount     int
@@ -48,13 +53,22 @@ type BackupRequest struct {
 	KeepMonthly        int
 }
 
+// RestoreOptions configures staging-volume and pre-restore safety snapshot behavior.
+type RestoreOptions struct {
+	PauseContainer   bool
+	TargetVolumeName string
+	PreRestoreBackup bool
+}
+
 // RestoreResult summarizes a completed volume restore operation.
 type RestoreResult struct {
-	Restored         bool     `json:"restored"`
-	TargetName       string   `json:"targetName"`
-	RestoredMounts   int      `json:"restoredMounts"`
-	PausedContainers []string `json:"pausedContainers"`
-	DurationMs       int64    `json:"durationMs"`
+	Restored           bool     `json:"restored"`
+	TargetName         string   `json:"targetName"`
+	RestoredMounts     int      `json:"restoredMounts"`
+	RestoredVolume     string   `json:"restoredVolume,omitempty"`
+	PreRestoreBackupID *uint    `json:"preRestoreBackupId,omitempty"`
+	PausedContainers   []string `json:"pausedContainers"`
+	DurationMs         int64    `json:"durationMs"`
 }
 
 type backupMountSpec struct {
@@ -175,6 +189,21 @@ func (s *Service) prepareBackup(ctx context.Context, req BackupRequest) (*prepar
 
 	startedAt := time.Now().UTC()
 	volumesJSON, _ := json.Marshal(mounts)
+	compression := dvcrypto.NormalizeCompression(req.Compression)
+	excludes := normalizeExcludeList(req.ExcludePatterns)
+	if len(excludes) == 0 && len(targets) > 0 {
+		var labelParts []string
+		for _, c := range targets {
+			if c.GitOpsExcludePaths != "" {
+				labelParts = append(labelParts, c.GitOpsExcludePaths)
+			}
+		}
+		if len(labelParts) > 0 {
+			excludes = ParseExcludePatterns(strings.Join(labelParts, "\n"))
+		}
+	}
+	req.Compression = compression
+	req.ExcludePatterns = excludes
 
 	logEntry := models.BackupLog{
 		ScheduleID:          req.ScheduleID,
@@ -186,6 +215,8 @@ func (s *Service) prepareBackup(ctx context.Context, req BackupRequest) (*prepar
 		StorageProviderName: provider.Name,
 		StorageType:         provider.Type,
 		AccessTier:          azureTierOrEmpty(provider),
+		Compression:         compression,
+		ExcludePatterns:     strings.Join(excludes, "\n"),
 		Encrypted:           provider.EncryptBackups,
 		Status:              "running",
 		VolumeCount:         len(mounts),
@@ -217,6 +248,7 @@ func (s *Service) executePrepared(ctx context.Context, prep *preparedBackup) (*m
 
 	logEntry := prep.logEntry
 	startedAt := prep.startedAt
+	tracker := s.progress.StartJob(logEntry.ID, prep.targetName, prep.req.TargetType)
 
 	failBackup := func(runErr error) (*models.BackupLog, error) {
 		completed := time.Now().UTC()
@@ -224,13 +256,48 @@ func (s *Service) executePrepared(ctx context.Context, prep *preparedBackup) (*m
 		logEntry.ErrorMessage = runErr.Error()
 		logEntry.CompletedAt = &completed
 		logEntry.DurationMs = completed.Sub(startedAt).Milliseconds()
+		logEntry.StepsJSON = tracker.Finish("failed", runErr.Error())
 		s.db.Save(&logEntry)
 		go notify.DispatchBackupAlert(context.Background(), s.db, &logEntry)
 		return &logEntry, runErr
 	}
 
+	tracker.BeginStep("helper", "Prepare Archive Helper", s.helperImage)
 	if err := s.ensureHelperImage(ctx); err != nil {
 		return failBackup(fmt.Errorf("prepare helper image %s: %w", s.helperImage, err))
+	}
+
+	// 0. Optional zero-downtime DB hot dumps (containers with a successful dump stay unpaused).
+	var dbDumps []dbDumpSpec
+	defer func() {
+		for _, d := range dbDumps {
+			_ = os.Remove(d.TempPath)
+		}
+	}()
+	dumpedContainers := make(map[string]bool)
+	if prep.req.DBHotDump {
+		tracker.BeginStep("db_dump", "Database Hot Dumps", "Capturing consistent database snapshots without downtime")
+		var dumpedNames []string
+		for _, c := range prep.targets {
+			if c.IsSelf || c.State != "running" || c.DetectedDB == "" {
+				continue
+			}
+			tracker.AddLog(fmt.Sprintf("Running %s hot dump on %s...", c.DetectedDB, c.Name))
+			spec, dumpErr := s.captureDBHotDump(ctx, c)
+			if dumpErr != nil {
+				return failBackup(dumpErr)
+			}
+			if spec != nil {
+				dbDumps = append(dbDumps, *spec)
+				dumpedContainers[c.ID] = true
+				dumpedNames = append(dumpedNames, fmt.Sprintf("%s (%s)", c.Name, c.DetectedDB))
+			}
+		}
+		if len(dumpedNames) == 0 {
+			tracker.CompleteCurrentStep("No running databases matched")
+		} else {
+			tracker.CompleteCurrentStep("Captured " + strings.Join(dumpedNames, ", "))
+		}
 	}
 
 	// 1. Run pre-backup exec hooks on running containers (label or schedule-level).
@@ -250,25 +317,38 @@ func (s *Service) executePrepared(ctx context.Context, prep *preparedBackup) (*m
 			if cmd != "" {
 				if err := s.execInContainer(hookCtx, c.ID, cmd); err != nil {
 					log.Printf("dockvault: warning: post-backup hook on %s failed: %v", c.Name, err)
+					tracker.AddLog(fmt.Sprintf("Post-hook warning on %s: %v", c.Name, err))
 				}
 			}
 		}
 	}
 	defer runPostHooks()
 
+	hasPreHooks := false
 	for _, c := range prep.targets {
-		if c.IsSelf || c.State != "running" {
-			continue
-		}
-		cmd := firstNonEmptyStr(prep.req.PreCommand, c.PreHook)
-		if cmd != "" {
-			if err := s.execInContainer(ctx, c.ID, cmd); err != nil {
-				return failBackup(fmt.Errorf("pre-backup hook on %s failed: %w", c.Name, err))
-			}
+		if !c.IsSelf && c.State == "running" && firstNonEmptyStr(prep.req.PreCommand, c.PreHook) != "" {
+			hasPreHooks = true
+			break
 		}
 	}
+	if hasPreHooks {
+		tracker.BeginStep("pre_hooks", "Pre-Backup Hooks", "Running container exec hooks")
+		for _, c := range prep.targets {
+			if c.IsSelf || c.State != "running" {
+				continue
+			}
+			cmd := firstNonEmptyStr(prep.req.PreCommand, c.PreHook)
+			if cmd != "" {
+				if err := s.execInContainer(ctx, c.ID, cmd); err != nil {
+					return failBackup(fmt.Errorf("pre-backup hook on %s failed: %w", c.Name, err))
+				}
+			}
+		}
+	} else {
+		tracker.SkipStep("Pre-Backup Hooks", "None configured")
+	}
 
-	// 2. Pause running non-self containers and guarantee unpause on every exit path.
+	// 2. Pause running non-self containers (skipping zero-downtime DB containers) and guarantee unpause.
 	var pausedNames []string
 	var pausedIDs []string
 	unpauseAll := func() {
@@ -287,23 +367,35 @@ func (s *Service) executePrepared(ctx context.Context, prep *preparedBackup) (*m
 	defer unpauseAll()
 
 	if prep.req.PauseContainer {
+		var toPause []ContainerInfo
 		for _, c := range prep.targets {
-			if c.IsSelf || c.State != "running" {
+			if c.IsSelf || c.State != "running" || dumpedContainers[c.ID] {
 				continue
 			}
-			if err := s.cli.ContainerPause(ctx, c.ID); err != nil {
-				return failBackup(fmt.Errorf("pause container %s: %w", c.Name, err))
-			}
-			pausedIDs = append(pausedIDs, c.ID)
-			pausedNames = append(pausedNames, c.Name)
+			toPause = append(toPause, c)
 		}
+		if len(toPause) > 0 {
+			tracker.BeginStep("pause", "Pause Containers", fmt.Sprintf("Pausing %d container(s)", len(toPause)))
+			for _, c := range toPause {
+				if err := s.cli.ContainerPause(ctx, c.ID); err != nil {
+					return failBackup(fmt.Errorf("pause container %s: %w", c.Name, err))
+				}
+				pausedIDs = append(pausedIDs, c.ID)
+				pausedNames = append(pausedNames, c.Name)
+			}
+		} else {
+			tracker.SkipStep("Pause Containers", "Zero-downtime / no running containers to pause")
+		}
+	} else {
+		tracker.SkipStep("Pause Containers", "Disabled")
 	}
 
 	pausedJSON, _ := json.Marshal(pausedNames)
 	logEntry.PausedContainersJSON = string(pausedJSON)
 
+	ext := dvcrypto.ArchiveExtension(prep.req.Compression)
 	baseSlug := fmt.Sprintf("%s-%s", sanitizeSlug(prep.targetName), startedAt.Format("20060102-150405"))
-	tempPlain, err := os.CreateTemp(s.backupDir, "dockvault-plain-*.tar.gz")
+	tempPlain, err := os.CreateTemp(s.backupDir, "dockvault-plain-*"+ext)
 	if err != nil {
 		return failBackup(fmt.Errorf("create temp archive: %w", err))
 	}
@@ -311,7 +403,15 @@ func (s *Service) executePrepared(ctx context.Context, prep *preparedBackup) (*m
 	_ = tempPlain.Close()
 	defer os.Remove(plainPath)
 
-	plainSize, plainChecksum, err := s.runArchiveHelper(ctx, prep.mounts, plainPath)
+	archDetail := fmt.Sprintf("%s compression · %d mount(s)", strings.ToUpper(prep.req.Compression), len(prep.mounts))
+	if len(prep.req.ExcludePatterns) > 0 {
+		archDetail += fmt.Sprintf(" · %d exclude(s)", len(prep.req.ExcludePatterns))
+	}
+	tracker.BeginStep("archive", "Archive & Compress", archDetail)
+
+	plainSize, plainChecksum, err := s.runArchiveHelper(
+		ctx, prep.mounts, prep.req.ExcludePatterns, prep.req.Compression, dbDumps, plainPath, tracker,
+	)
 	// Unpause and run post-hooks immediately after archiving so container downtime stays minimal.
 	unpauseAll()
 	runPostHooks()
@@ -321,11 +421,34 @@ func (s *Service) executePrepared(ctx context.Context, prep *preparedBackup) (*m
 	}
 
 	// 3. Store to primary destination (encrypting if configured on primary provider).
+	uploadDetail := prep.provider.Name
+	if prep.provider.EncryptBackups {
+		uploadDetail += " (AES-256-GCM)"
+	}
+	tracker.BeginStep("upload", "Encrypt & Store Primary", uploadDetail)
 	primaryFileName, primaryPath, primarySize, primaryChecksum, err := s.saveArchiveForProvider(
-		ctx, prep.provider, prep.driver, plainPath, plainSize, plainChecksum, baseSlug,
+		ctx, prep.provider, prep.driver, plainPath, plainSize, plainChecksum, baseSlug, ext,
 	)
 	if err != nil {
 		return failBackup(err)
+	}
+
+	// 4. Optional 3-2-1 secondary offsite copy (runs independently using the captured plaintext archive).
+	if prep.secondaryProvider != nil && prep.secondaryDriver != nil {
+		tracker.BeginStep("secondary", "3-2-1 Offsite Replication", prep.secondaryProvider.Name)
+		s.replicateToSecondary(ctx, prep, &logEntry, plainPath, plainSize, plainChecksum, baseSlug, ext)
+	}
+
+	// 5. Retention pruning (pin-protected, count or GFS).
+	if prep.req.ScheduleID != nil {
+		tracker.BeginStep("retention", "Retention Pruning", prep.req.RetentionPolicy)
+		s.pruneScheduleRetention(ctx, *prep.req.ScheduleID, RetentionPolicyConfig{
+			Policy:      prep.req.RetentionPolicy,
+			Count:       prep.req.RetentionCount,
+			KeepDaily:   prep.req.KeepDaily,
+			KeepWeekly:  prep.req.KeepWeekly,
+			KeepMonthly: prep.req.KeepMonthly,
+		})
 	}
 
 	completed := time.Now().UTC()
@@ -336,24 +459,9 @@ func (s *Service) executePrepared(ctx context.Context, prep *preparedBackup) (*m
 	logEntry.ChecksumSHA256 = primaryChecksum
 	logEntry.CompletedAt = &completed
 	logEntry.DurationMs = completed.Sub(startedAt).Milliseconds()
+	logEntry.StepsJSON = tracker.Finish("success", "")
 	if err := s.db.Save(&logEntry).Error; err != nil {
 		return &logEntry, fmt.Errorf("update backup log: %w", err)
-	}
-
-	// 4. Optional 3-2-1 secondary offsite copy (runs independently using the captured plaintext archive).
-	if prep.secondaryProvider != nil && prep.secondaryDriver != nil {
-		s.replicateToSecondary(ctx, prep, &logEntry, plainPath, plainSize, plainChecksum, baseSlug)
-	}
-
-	// 5. Retention pruning (pin-protected, count or GFS).
-	if prep.req.ScheduleID != nil {
-		s.pruneScheduleRetention(ctx, *prep.req.ScheduleID, RetentionPolicyConfig{
-			Policy:      prep.req.RetentionPolicy,
-			Count:       prep.req.RetentionCount,
-			KeepDaily:   prep.req.KeepDaily,
-			KeepWeekly:  prep.req.KeepWeekly,
-			KeepMonthly: prep.req.KeepMonthly,
-		})
 	}
 
 	go notify.DispatchBackupAlert(context.Background(), s.db, &logEntry)
@@ -368,14 +476,15 @@ func (s *Service) saveArchiveForProvider(
 	plainSize int64,
 	plainChecksum string,
 	baseSlug string,
+	ext string,
 ) (fileName, storagePath string, sizeBytes int64, checksum string, err error) {
 	uploadSource := plainPath
-	fileName = baseSlug + ".tar.gz"
+	fileName = baseSlug + ext
 	sizeBytes = plainSize
 	checksum = plainChecksum
 
 	if provider.EncryptBackups {
-		encTemp, tmpErr := os.CreateTemp(s.backupDir, "dockvault-enc-*.tar.gz.enc")
+		encTemp, tmpErr := os.CreateTemp(s.backupDir, "dockvault-enc-*"+ext+".enc")
 		if tmpErr != nil {
 			return "", "", 0, "", fmt.Errorf("create encrypted temp archive: %w", tmpErr)
 		}
@@ -388,12 +497,12 @@ func (s *Service) saveArchiveForProvider(
 			return "", "", 0, "", fmt.Errorf("encrypt archive: %w", encErr)
 		}
 		uploadSource = encPath
-		fileName = baseSlug + ".tar.gz.enc"
+		fileName = baseSlug + ext + ".enc"
 		sizeBytes = encSize
 		checksum = encSum
 	} else {
 		// Copy plainPath so Save() can safely rename/remove its source without breaking secondary replication.
-		copyTemp, copyErr := os.CreateTemp(s.backupDir, "dockvault-upload-*.tar.gz")
+		copyTemp, copyErr := os.CreateTemp(s.backupDir, "dockvault-upload-*"+ext)
 		if copyErr != nil {
 			return "", "", 0, "", fmt.Errorf("prepare upload temp archive: %w", copyErr)
 		}
@@ -423,6 +532,7 @@ func (s *Service) replicateToSecondary(
 	plainSize int64,
 	plainChecksum string,
 	baseSlug string,
+	ext string,
 ) {
 	secProv := *prep.secondaryProvider
 	secLog := models.BackupLog{
@@ -435,6 +545,8 @@ func (s *Service) replicateToSecondary(
 		StorageProviderName:  secProv.Name,
 		StorageType:          secProv.Type,
 		AccessTier:           azureTierOrEmpty(secProv),
+		Compression:          primaryLog.Compression,
+		ExcludePatterns:      primaryLog.ExcludePatterns,
 		Encrypted:            secProv.EncryptBackups,
 		Status:               "running",
 		VolumeCount:          primaryLog.VolumeCount,
@@ -445,7 +557,7 @@ func (s *Service) replicateToSecondary(
 	_ = s.db.Create(&secLog).Error
 
 	fName, sPath, sz, sum, err := s.saveArchiveForProvider(
-		ctx, secProv, prep.secondaryDriver, plainPath, plainSize, plainChecksum, baseSlug,
+		ctx, secProv, prep.secondaryDriver, plainPath, plainSize, plainChecksum, baseSlug, ext,
 	)
 	done := time.Now().UTC()
 	secLog.CompletedAt = &done
@@ -468,6 +580,12 @@ func (s *Service) replicateToSecondary(
 
 // RestoreBackup extracts a stored archive back into its original Docker volumes/bind mounts.
 func (s *Service) RestoreBackup(ctx context.Context, logEntry models.BackupLog, pauseContainer bool) (*RestoreResult, error) {
+	return s.RestoreBackupWithOptions(ctx, logEntry, RestoreOptions{PauseContainer: pauseContainer})
+}
+
+// RestoreBackupWithOptions extracts a backup into original mounts or a staging volume,
+// optionally taking a pre-restore safety snapshot before overwriting live data.
+func (s *Service) RestoreBackupWithOptions(ctx context.Context, logEntry models.BackupLog, opts RestoreOptions) (*RestoreResult, error) {
 	if logEntry.Status != "success" || logEntry.StoragePath == "" {
 		return nil, fmt.Errorf("backup archive is not available for restore")
 	}
@@ -475,6 +593,34 @@ func (s *Service) RestoreBackup(ctx context.Context, logEntry models.BackupLog, 
 	var mounts []backupMountSpec
 	if err := json.Unmarshal([]byte(logEntry.VolumesJSON), &mounts); err != nil || len(mounts) == 0 {
 		return nil, fmt.Errorf("backup archive contains no restorable mount metadata")
+	}
+
+	stagingVol := strings.TrimSpace(opts.TargetVolumeName)
+	if stagingVol != "" {
+		if _, err := storage.SafeFileName(stagingVol); err != nil {
+			return nil, fmt.Errorf("invalid staging volume name %q", stagingVol)
+		}
+		if _, err := s.cli.VolumeCreate(ctx, volume.CreateOptions{Name: stagingVol}); err != nil {
+			return nil, fmt.Errorf("create staging volume %q: %w", stagingVol, err)
+		}
+	}
+
+	var preRestoreID *uint
+	if stagingVol == "" && opts.PreRestoreBackup {
+		snap, snapErr := s.ExecuteBackup(ctx, BackupRequest{
+			TargetType:        logEntry.TargetType,
+			TargetID:          logEntry.TargetID,
+			StorageProviderID: logEntry.StorageProviderID,
+			PauseContainer:    opts.PauseContainer,
+			Compression:       logEntry.Compression,
+			Trigger:           "pre-restore",
+		})
+		if snapErr != nil {
+			return nil, fmt.Errorf("pre-restore safety snapshot failed (restore aborted): %w", snapErr)
+		}
+		if snap != nil {
+			preRestoreID = &snap.ID
+		}
 	}
 
 	lockKey := logEntry.TargetType + ":" + logEntry.TargetID
@@ -506,6 +652,12 @@ func (s *Service) RestoreBackup(ctx context.Context, logEntry models.BackupLog, 
 	}
 	defer archiveStream.Close()
 
+	tarStream, err := dvcrypto.OpenCompressedReader(archiveStream, logEntry.FileName)
+	if err != nil {
+		return nil, fmt.Errorf("decompress archive: %w", err)
+	}
+	defer tarStream.Close()
+
 	if err := s.ensureHelperImage(ctx); err != nil {
 		return nil, fmt.Errorf("prepare helper image %s: %w", s.helperImage, err)
 	}
@@ -528,7 +680,7 @@ func (s *Service) RestoreBackup(ctx context.Context, logEntry models.BackupLog, 
 	}
 	defer unpauseAll()
 
-	if pauseContainer && (logEntry.TargetType == "container" || logEntry.TargetType == "stack") {
+	if stagingVol == "" && opts.PauseContainer && (logEntry.TargetType == "container" || logEntry.TargetType == "stack") {
 		if targets, _, _, err := s.resolveTargets(ctx, logEntry.TargetType, logEntry.TargetID, nil); err == nil {
 			for _, c := range targets {
 				if c.IsSelf || c.State != "running" {
@@ -543,17 +695,19 @@ func (s *Service) RestoreBackup(ctx context.Context, logEntry models.BackupLog, 
 		}
 	}
 
-	if err := s.runRestoreHelper(ctx, mounts, archiveStream); err != nil {
+	if err := s.runRestoreHelper(ctx, mounts, stagingVol, tarStream); err != nil {
 		return nil, err
 	}
 	unpauseAll()
 
 	return &RestoreResult{
-		Restored:         true,
-		TargetName:       logEntry.TargetName,
-		RestoredMounts:   len(mounts),
-		PausedContainers: pausedNames,
-		DurationMs:       time.Since(startedAt).Milliseconds(),
+		Restored:           true,
+		TargetName:         logEntry.TargetName,
+		RestoredMounts:     len(mounts),
+		RestoredVolume:     stagingVol,
+		PreRestoreBackupID: preRestoreID,
+		PausedContainers:   pausedNames,
+		DurationMs:         time.Since(startedAt).Milliseconds(),
 	}, nil
 }
 
@@ -720,7 +874,15 @@ func (s *Service) ensureHelperImage(ctx context.Context) error {
 	return nil
 }
 
-func (s *Service) runArchiveHelper(ctx context.Context, mounts []backupMountSpec, tempPath string) (int64, string, error) {
+func (s *Service) runArchiveHelper(
+	ctx context.Context,
+	mounts []backupMountSpec,
+	excludes []string,
+	compression string,
+	dbDumps []dbDumpSpec,
+	tempPath string,
+	tracker *JobTracker,
+) (int64, string, error) {
 	binds := make([]string, 0, len(mounts))
 	for _, m := range mounts {
 		src := m.Source
@@ -730,11 +892,17 @@ func (s *Service) runArchiveHelper(ctx context.Context, mounts []backupMountSpec
 		binds = append(binds, fmt.Sprintf("%s:/source/%s:ro", src, m.ArchiveDir))
 	}
 
+	tarCmd := []string{"tar", "-cf", "-"}
+	for _, ex := range excludes {
+		tarCmd = append(tarCmd, "--exclude="+ex)
+	}
+	tarCmd = append(tarCmd, "-C", "/source", ".")
+
 	resp, err := s.cli.ContainerCreate(
 		ctx,
 		&container.Config{
 			Image:        s.helperImage,
-			Cmd:          []string{"sh", "-c", "tar -czf - -C /source ."},
+			Cmd:          tarCmd,
 			AttachStdout: true,
 			AttachStderr: true,
 			Tty:          false,
@@ -780,16 +948,46 @@ func (s *Service) runArchiveHelper(ctx context.Context, mounts []backupMountSpec
 	}
 
 	hasher := sha256.New()
-	multiOut := io.MultiWriter(outFile, hasher)
-	var stderrBuf bytes.Buffer
+	counter := &progressCountingWriter{dst: outFile, tracker: tracker}
+	multiOut := io.MultiWriter(counter, hasher)
 
-	written, copyErr := stdcopy.StdCopy(multiOut, &stderrBuf, attachResp.Reader)
-	closeErr := outFile.Close()
-	if copyErr != nil {
-		return 0, "", fmt.Errorf("stream archive from helper: %w", copyErr)
+	compWriter, err := dvcrypto.NewCompressedWriter(multiOut, compression)
+	if err != nil {
+		_ = outFile.Close()
+		return 0, "", fmt.Errorf("init compressor: %w", err)
 	}
-	if closeErr != nil {
-		return 0, "", fmt.Errorf("close temp archive: %w", closeErr)
+
+	pr, pw := io.Pipe()
+	var stderrBuf bytes.Buffer
+	demuxCh := make(chan error, 1)
+	go func() {
+		_, copyErr := stdcopy.StdCopy(pw, &stderrBuf, attachResp.Reader)
+		_ = pw.CloseWithError(copyErr)
+		demuxCh <- copyErr
+	}()
+
+	var compressErr error
+	if len(dbDumps) == 0 {
+		_, compressErr = io.Copy(compWriter, pr)
+	} else {
+		compressErr = copyTarAndAppendDB(pr, compWriter, dbDumps)
+	}
+	_ = pr.Close()
+	demuxErr := <-demuxCh
+	compCloseErr := compWriter.Close()
+	fileCloseErr := outFile.Close()
+
+	if demuxErr != nil {
+		return 0, "", fmt.Errorf("stream archive from helper: %w", demuxErr)
+	}
+	if compressErr != nil {
+		return 0, "", fmt.Errorf("compress archive: %w", compressErr)
+	}
+	if compCloseErr != nil {
+		return 0, "", fmt.Errorf("finalize compressed archive: %w", compCloseErr)
+	}
+	if fileCloseErr != nil {
+		return 0, "", fmt.Errorf("close temp archive: %w", fileCloseErr)
 	}
 
 	waitCh, errCh := s.cli.ContainerWait(ctx, helperID, container.WaitConditionNotRunning)
@@ -809,24 +1007,86 @@ func (s *Service) runArchiveHelper(ctx context.Context, mounts []backupMountSpec
 	}
 
 	checksum := hex.EncodeToString(hasher.Sum(nil))
-	return written, checksum, nil
+	return counter.total, checksum, nil
 }
 
-func (s *Service) runRestoreHelper(ctx context.Context, mounts []backupMountSpec, archiveStream io.Reader) error {
-	binds := make([]string, 0, len(mounts))
-	for _, m := range mounts {
-		src := m.Source
-		if m.Type == "volume" && m.Name != "" {
-			src = m.Name
+func copyTarAndAppendDB(src io.Reader, dst io.Writer, dumps []dbDumpSpec) error {
+	tr := tar.NewReader(src)
+	tw := tar.NewWriter(dst)
+
+	for {
+		hdr, err := tr.Next()
+		if errors.Is(err, io.EOF) {
+			break
 		}
-		binds = append(binds, fmt.Sprintf("%s:/restore/%s:rw", src, m.ArchiveDir))
+		if err != nil {
+			return err
+		}
+		if err := tw.WriteHeader(hdr); err != nil {
+			return err
+		}
+		if hdr.Size > 0 {
+			if _, err := io.Copy(tw, tr); err != nil {
+				return err
+			}
+		}
+	}
+
+	now := time.Now().UTC()
+	if err := tw.WriteHeader(&tar.Header{
+		Name:     "db_dumps/",
+		Mode:     0o755,
+		Typeflag: tar.TypeDir,
+		ModTime:  now,
+	}); err != nil {
+		return err
+	}
+
+	for _, d := range dumps {
+		f, err := os.Open(d.TempPath)
+		if err != nil {
+			return err
+		}
+		if err := tw.WriteHeader(&tar.Header{
+			Name:     d.ArchivePath,
+			Size:     d.Size,
+			Mode:     0o640,
+			Typeflag: tar.TypeReg,
+			ModTime:  now,
+		}); err != nil {
+			_ = f.Close()
+			return err
+		}
+		if _, err := io.Copy(tw, f); err != nil {
+			_ = f.Close()
+			return err
+		}
+		_ = f.Close()
+	}
+
+	return tw.Close()
+}
+
+func (s *Service) runRestoreHelper(ctx context.Context, mounts []backupMountSpec, stagingVol string, tarStream io.Reader) error {
+	var binds []string
+	if stagingVol != "" {
+		binds = []string{fmt.Sprintf("%s:/restore:rw", stagingVol)}
+	} else {
+		binds = make([]string, 0, len(mounts))
+		for _, m := range mounts {
+			src := m.Source
+			if m.Type == "volume" && m.Name != "" {
+				src = m.Name
+			}
+			binds = append(binds, fmt.Sprintf("%s:/restore/%s:rw", src, m.ArchiveDir))
+		}
 	}
 
 	resp, err := s.cli.ContainerCreate(
 		ctx,
 		&container.Config{
 			Image:        s.helperImage,
-			Cmd:          []string{"sh", "-c", "tar -xzf - -C /restore"},
+			Cmd:          []string{"tar", "-xf", "-", "-C", "/restore"},
 			AttachStdin:  true,
 			OpenStdin:    true,
 			StdinOnce:    true,
@@ -877,7 +1137,7 @@ func (s *Service) runRestoreHelper(ctx context.Context, mounts []backupMountSpec
 		drainDone <- err
 	}()
 
-	if _, err := io.Copy(attachResp.Conn, archiveStream); err != nil {
+	if _, err := io.Copy(attachResp.Conn, tarStream); err != nil {
 		return fmt.Errorf("stream archive into restore helper: %w", err)
 	}
 	if err := attachResp.CloseWrite(); err != nil {

@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { Archive, HardDrive, PauseCircle, Play, Terminal } from 'lucide-react'
+import { Archive, Database, HardDrive, PauseCircle, Play, Terminal } from 'lucide-react'
 import { api } from '../api/client'
 import { Badge, Button, Input, Label, Modal, Select, Switch } from './ui'
 
@@ -24,17 +24,32 @@ export function BackupModal({
   const [showAdvanced, setShowAdvanced] = useState(false)
   const [preCommand, setPreCommand] = useState('')
   const [postCommand, setPostCommand] = useState('')
+  const [compression, setCompression] = useState('gzip')
+  const [excludePatterns, setExcludePatterns] = useState('')
+  const [dbHotDump, setDbHotDump] = useState(false)
   const [submitting, setSubmitting] = useState(false)
 
   useEffect(() => {
     if (open && target) {
+      const detectedDBs = target.detectedDbs?.length
+        ? target.detectedDbs
+        : target.detectedDb
+          ? [target.detectedDb]
+          : []
       setStorageProviderId(defaultProvider?.id ? String(defaultProvider.id) : '')
       setSecondaryStorageId('')
       setPauseContainer(defaultPauseBackups)
       setSelectedMounts((target.mounts || []).map(mountKey))
-      setShowAdvanced(false)
+      setShowAdvanced(Boolean(target.gitopsExcludePaths))
       setPreCommand('')
       setPostCommand('')
+      setCompression(target.gitopsCompression || 'gzip')
+      setExcludePatterns(target.gitopsExcludePaths || '')
+      setDbHotDump(
+        target.gitopsDbHotDump !== undefined && target.gitopsDbHotDump !== null
+          ? Boolean(target.gitopsDbHotDump)
+          : detectedDBs.length > 0,
+      )
     }
   }, [open, target, defaultProvider?.id, defaultPauseBackups])
 
@@ -42,6 +57,11 @@ export function BackupModal({
 
   const activeProviderId = storageProviderId || defaultProvider?.id || ''
   const mounts = target.mounts || []
+  const detectedDBs = target.detectedDbs?.length
+    ? target.detectedDbs
+    : target.detectedDb
+      ? [target.detectedDb]
+      : []
 
   function toggleMount(key) {
     setSelectedMounts((prev) =>
@@ -65,6 +85,9 @@ export function BackupModal({
         pauseContainer,
         preCommand: preCommand.trim(),
         postCommand: postCommand.trim(),
+        compression,
+        excludePatterns: excludePatterns.trim(),
+        dbHotDump,
       }
       if (selectedMounts.length < mounts.length) {
         payload.selectedMounts = selectedMounts
@@ -187,57 +210,101 @@ export function BackupModal({
           </div>
         </div>
 
-        {target.targetType !== 'volume' && (
-          <div className="flex items-center justify-between rounded-xl border border-zinc-800 bg-zinc-950/50 px-3.5 py-2.5">
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          <div>
+            <Label htmlFor="backup-compression">Archive Compression</Label>
+            <Select
+              id="backup-compression"
+              value={compression}
+              onChange={(e) => setCompression(e.target.value)}
+            >
+              <option value="gzip">gzip (.tar.gz — Universal)</option>
+              <option value="zstd">zstd (.tar.zst — Faster &amp; Smaller)</option>
+            </Select>
+          </div>
+          {target.targetType !== 'volume' && (
+            <div className="flex items-center justify-between rounded-xl border border-zinc-800 bg-zinc-950/50 px-3.5 py-2.5">
+              <div className="pr-2">
+                <div className="flex items-center gap-1.5 text-xs font-medium text-zinc-200">
+                  <PauseCircle className="h-3.5 w-3.5 text-sky-400" />
+                  Pause containers
+                </div>
+                <p className="mt-0.5 text-[11px] text-zinc-400">Freezes I/O during tar.</p>
+              </div>
+              <Switch checked={pauseContainer} onChange={setPauseContainer} />
+            </div>
+          )}
+        </div>
+
+        {target.targetType !== 'volume' && detectedDBs.length > 0 && (
+          <div className="flex items-center justify-between rounded-xl border border-emerald-500/30 bg-emerald-500/5 px-3.5 py-2.5">
             <div className="pr-3">
-              <div className="flex items-center gap-1.5 text-xs font-medium text-zinc-200">
-                <PauseCircle className="h-3.5 w-3.5 text-sky-400" />
-                Pause container(s) during archive
+              <div className="flex items-center gap-1.5 text-xs font-medium text-zinc-100">
+                <Database className="h-3.5 w-3.5 text-emerald-400" />
+                Zero-Downtime DB Hot Dump ({detectedDBs.join(', ')})
               </div>
               <p className="mt-0.5 text-[11px] text-zinc-400">
-                Freezes I/O via Docker pause for consistent database snapshots, then unpauses immediately.
+                Streams consistent DB dumps directly into <span className="font-mono">db_dumps/</span> and skips pausing DB containers.
               </p>
             </div>
-            <Switch checked={pauseContainer} onChange={setPauseContainer} />
+            <Switch checked={dbHotDump} onChange={setDbHotDump} />
           </div>
         )}
 
-        {target.targetType !== 'volume' && (
-          <div>
-            <button
-              type="button"
-              onClick={() => setShowAdvanced(!showAdvanced)}
-              className="flex items-center gap-1.5 text-xs text-zinc-400 hover:text-zinc-200 cursor-pointer"
-            >
-              <Terminal className="h-3.5 w-3.5" />
-              {showAdvanced ? 'Hide pre/post exec hooks' : 'Add pre/post exec hooks (optional)'}
-            </button>
-            {showAdvanced && (
-              <div className="mt-2 space-y-2 rounded-xl border border-zinc-800 bg-zinc-950/50 p-3">
-                <div>
-                  <Label htmlFor="bk-pre">Pre-backup exec command</Label>
-                  <Input
-                    id="bk-pre"
-                    value={preCommand}
-                    onChange={(e) => setPreCommand(e.target.value)}
-                    placeholder="pg_dumpall -U postgres > /var/lib/postgresql/data/dump.sql"
-                    className="font-mono text-xs"
-                  />
-                </div>
-                <div>
-                  <Label htmlFor="bk-post">Post-backup cleanup command</Label>
-                  <Input
-                    id="bk-post"
-                    value={postCommand}
-                    onChange={(e) => setPostCommand(e.target.value)}
-                    placeholder="rm -f /var/lib/postgresql/data/dump.sql"
-                    className="font-mono text-xs"
-                  />
-                </div>
+        <div>
+          <button
+            type="button"
+            onClick={() => setShowAdvanced(!showAdvanced)}
+            className="flex items-center gap-1.5 text-xs text-zinc-400 hover:text-zinc-200 cursor-pointer"
+          >
+            <Terminal className="h-3.5 w-3.5" />
+            {showAdvanced ? 'Hide exclusions & exec hooks' : 'Exclusions & pre/post exec hooks (optional)'}
+          </button>
+          {showAdvanced && (
+            <div className="mt-2 space-y-2.5 rounded-xl border border-zinc-800 bg-zinc-950/50 p-3">
+              <div>
+                <Label htmlFor="bk-excludes">Exclude Patterns (comma or newline separated)</Label>
+                <textarea
+                  id="bk-excludes"
+                  rows={2}
+                  value={excludePatterns}
+                  onChange={(e) => setExcludePatterns(e.target.value)}
+                  placeholder="*.log, **/cache/**, node_modules, tmp/"
+                  style={{
+                    backgroundColor: 'var(--dv-input-bg)',
+                    borderColor: 'var(--dv-border-strong)',
+                    color: 'var(--dv-text)',
+                  }}
+                  className="w-full rounded-lg border px-3 py-2 font-mono text-xs placeholder:text-zinc-500 focus:outline-none focus:ring-2 focus:ring-sky-500/40"
+                />
               </div>
-            )}
-          </div>
-        )}
+              {target.targetType !== 'volume' && (
+                <>
+                  <div>
+                    <Label htmlFor="bk-pre">Pre-backup exec command</Label>
+                    <Input
+                      id="bk-pre"
+                      value={preCommand}
+                      onChange={(e) => setPreCommand(e.target.value)}
+                      placeholder="pg_dumpall -U postgres > /var/lib/postgresql/data/dump.sql"
+                      className="font-mono text-xs"
+                    />
+                  </div>
+                  <div>
+                    <Label htmlFor="bk-post">Post-backup cleanup command</Label>
+                    <Input
+                      id="bk-post"
+                      value={postCommand}
+                      onChange={(e) => setPostCommand(e.target.value)}
+                      placeholder="rm -f /var/lib/postgresql/data/dump.sql"
+                      className="font-mono text-xs"
+                    />
+                  </div>
+                </>
+              )}
+            </div>
+          )}
+        </div>
 
         <div className="flex items-center justify-end gap-2 pt-2">
           <Button type="button" variant="ghost" onClick={onClose}>

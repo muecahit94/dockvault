@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import {
+  Activity,
   Bell,
   BellOff,
   CalendarClock,
@@ -14,11 +15,13 @@ import {
 } from 'lucide-react'
 import {
   api,
+  formatBytes,
   setTimeFormatPreference,
   setUnauthorizedHandler,
   summarizeNotificationsList,
 } from './api/client'
 import { BackupModal } from './components/BackupModal'
+import { LiveProgressDrawer } from './components/LiveProgressDrawer'
 import { ScheduleModal } from './components/ScheduleModal'
 import { Badge, Button, ToastContainer } from './components/ui'
 import { Containers } from './pages/Containers'
@@ -90,6 +93,9 @@ export default function App() {
 
   const [backupTarget, setBackupTarget] = useState(null)
   const [scheduleModal, setScheduleModal] = useState({ open: false, initialTarget: null, existing: null })
+  const [liveJobs, setLiveJobs] = useState([])
+  const [progressDrawerOpen, setProgressDrawerOpen] = useState(false)
+  const prevRunningIdsRef = useRef(new Set())
   const [toasts, setToasts] = useState([])
 
   const notify = useCallback((type, message) => {
@@ -200,8 +206,40 @@ export default function App() {
     loadAll()
   }, [loadAll])
 
+  // Subscribe to SSE live backup progress events when authenticated.
+  useEffect(() => {
+    if (authChecking || (authStatus.enabled && !authStatus.authenticated)) return undefined
+    const es = new EventSource(api.backupEventsUrl())
+    es.addEventListener('progress', (e) => {
+      try {
+        const data = JSON.parse(e.data)
+        const jobs = Array.isArray(data.jobs) ? data.jobs : []
+        setLiveJobs(jobs)
+
+        const currentRunning = new Set(jobs.filter((j) => j.status === 'running').map((j) => j.backupId))
+        let finishedAny = false
+        for (const id of prevRunningIdsRef.current) {
+          if (!currentRunning.has(id)) {
+            finishedAny = true
+            break
+          }
+        }
+        prevRunningIdsRef.current = currentRunning
+        if (finishedAny) {
+          loadAll(true)
+        }
+      } catch {
+        // Ignore malformed progress frames.
+      }
+    })
+    return () => {
+      es.close()
+    }
+  }, [authChecking, authStatus.enabled, authStatus.authenticated, loadAll])
+
   // Fast poll while any backup job is running; optional background auto-refresh from Settings.
-  const hasRunningBackup = backups.some((b) => b.status === 'running')
+  const activeLiveJobs = liveJobs.filter((j) => j.status === 'running')
+  const hasRunningBackup = activeLiveJobs.length > 0 || backups.some((b) => b.status === 'running')
   useEffect(() => {
     if (authStatus.enabled && !authStatus.authenticated) return
     const intervalMs = hasRunningBackup
@@ -322,10 +360,26 @@ export default function App() {
           </div>
 
           <div className="flex items-center gap-2.5">
-            {hasRunningBackup && (
-              <Badge variant="info" className="animate-pulse">
-                Backup in progress…
-              </Badge>
+            {(hasRunningBackup || liveJobs.length > 0) && (
+              <button
+                type="button"
+                onClick={() => setProgressDrawerOpen(true)}
+                title="View live backup step progress & logs"
+                className="cursor-pointer transition-opacity hover:opacity-85"
+              >
+                <Badge variant={hasRunningBackup ? 'info' : 'neutral'} className={hasRunningBackup ? 'animate-pulse' : ''}>
+                  <Activity className="h-3 w-3" />
+                  {activeLiveJobs[0]
+                    ? `${activeLiveJobs[0].targetName}: ${activeLiveJobs[0].phaseLabel || 'Running'}${
+                        activeLiveJobs[0].bytesProcessed > 0
+                          ? ` · ${formatBytes(activeLiveJobs[0].bytesProcessed)}`
+                          : ''
+                      }`
+                    : hasRunningBackup
+                      ? 'Backup in progress…'
+                      : `Recent activity (${liveJobs.length})`}
+                </Badge>
+              </button>
             )}
             <Badge variant={dockerConnected ? 'success' : 'danger'}>
               <span
@@ -504,8 +558,17 @@ export default function App() {
         target={backupTarget}
         providers={providers}
         defaultPauseBackups={preferences.defaultPauseBackups}
-        onStarted={() => loadAll(true)}
+        onStarted={() => {
+          setProgressDrawerOpen(true)
+          loadAll(true)
+        }}
         notify={notify}
+      />
+
+      <LiveProgressDrawer
+        open={progressDrawerOpen}
+        onClose={() => setProgressDrawerOpen(false)}
+        jobs={liveJobs}
       />
 
       <ScheduleModal
