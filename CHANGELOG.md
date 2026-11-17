@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.4.0](https://github.com/muecahit94/dockvault/compare/v0.3.0...v0.4.0) (2026-11-17)
+
+
+### Features
+
+* add backup compare, selective restore, bulk actions, stale aler… ([87b5d91](https://github.com/muecahit94/dockvault/commit/87b5d9106bd131cbf1416a626cc53277123dd20e))
+* add backup compare, selective restore, bulk actions, stale alerts, retries, and E2E suite ([59f998d](https://github.com/muecahit94/dockvault/commit/59f998d9593497bea3d807206a7a68df4d5dcea7))
+
 ## [0.3.0](https://github.com/muecahit94/dockvault/compare/v0.2.1...v0.3.0) (2026-11-17)
 
 
