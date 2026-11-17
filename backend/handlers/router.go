@@ -3,6 +3,7 @@ package handlers
 import (
 	"io/fs"
 	"net/http"
+	"strings"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/fiber/v2/middleware/filesystem"
@@ -42,7 +43,7 @@ func NewApp(cfg *config.Config, db *gorm.DB, dockerSvc *docker.Service, schedMgr
 	app.Use(logger.New(logger.Config{
 		Format: "${time} | ${status} | ${latency} | ${method} ${path}\n",
 	}))
-	app.Use(securityHeaders())
+	app.Use(securityHeaders(cfg.FrameAncestors))
 
 	api := app.Group("/api")
 
@@ -118,10 +119,30 @@ func NewApp(cfg *config.Config, db *gorm.DB, dockerSvc *docker.Service, schedMgr
 	return app
 }
 
-func securityHeaders() fiber.Handler {
+func securityHeaders(rawFrameAncestors string) fiber.Handler {
+	cleaned := strings.ReplaceAll(rawFrameAncestors, ",", " ")
+	ancestors := strings.Fields(cleaned)
+	var cspFrameAncestors string
+	if len(ancestors) > 0 {
+		// Prevent semicolon injection into the CSP header value.
+		safe := make([]string, 0, len(ancestors))
+		for _, a := range ancestors {
+			if !strings.ContainsAny(a, ";\r\n") {
+				safe = append(safe, a)
+			}
+		}
+		if len(safe) > 0 {
+			cspFrameAncestors = "frame-ancestors 'self' " + strings.Join(safe, " ")
+		}
+	}
+
 	return func(c *fiber.Ctx) error {
 		c.Set("X-Content-Type-Options", "nosniff")
-		c.Set("X-Frame-Options", "DENY")
+		if cspFrameAncestors != "" {
+			c.Set("Content-Security-Policy", cspFrameAncestors)
+		} else {
+			c.Set("X-Frame-Options", "DENY")
+		}
 		c.Set("Referrer-Policy", "no-referrer")
 		c.Set("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
 		return c.Next()
