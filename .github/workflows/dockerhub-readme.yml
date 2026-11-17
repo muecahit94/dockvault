@@ -31,5 +31,5 @@ jobs:
           password: ${{ secrets.DOCKERHUB_TOKEN }}
           repository: muecahit/dockvault
           readme-filepath: ./README.md
-          short-description: ${{ github.event.repository.description }}
+          short-description: Self-hosted Docker volume & Compose backup UI with AES-256 encryption, S3/Azure sync & restore.
           enable-url-completion: true
