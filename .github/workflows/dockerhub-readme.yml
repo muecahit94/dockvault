@@ -5,8 +5,8 @@ on:
     branches:
       - main
     paths:
-      - README.md
-      - assets/logo.png
+      - README.dockerhub.md
+      - .github/workflows/dockerhub-readme.yml
   workflow_dispatch:
 
 jobs:
@@ -16,12 +16,12 @@ jobs:
       DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
       DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
     steps:
-      - name: Checkout README
+      - name: Checkout Docker Hub README
         if: ${{ env.DOCKERHUB_USERNAME != '' && env.DOCKERHUB_TOKEN != '' }}
         uses: actions/checkout@v4
         with:
           sparse-checkout: |
-            README.md
+            README.dockerhub.md
 
       - name: Update Docker Hub Description
         if: ${{ env.DOCKERHUB_USERNAME != '' && env.DOCKERHUB_TOKEN != '' }}
@@ -30,6 +30,6 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
           repository: muecahit/dockvault
-          readme-filepath: ./README.md
+          readme-filepath: ./README.dockerhub.md
           short-description: Self-hosted Docker volume & Compose backup UI with AES-256 encryption, S3/Azure sync & restore.
           enable-url-completion: true
