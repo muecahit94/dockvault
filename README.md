@@ -27,8 +27,8 @@ Automatically discover running containers, Compose stacks, and named volumes—b
   <a href="https://github.com/muecahit94/dockvault/stargazers">
     <img src="https://img.shields.io/github/stars/muecahit94/dockvault?label=stars&logo=github&color=007ec6" alt="GitHub Stars" />
   </a>
-  <a href="LICENSE">
-    <img src="https://img.shields.io/github/license/muecahit94/dockvault?color=007ec6" alt="License" />
+  <a href="https://github.com/muecahit94/dockvault/blob/main/LICENSE">
+    <img src="https://img.shields.io/badge/license-MIT-007ec6" alt="License" />
   </a>
 </p>
 
@@ -221,4 +221,4 @@ npm run dev
 
 ## License
 
-[MIT](LICENSE)
+[MIT](https://github.com/muecahit94/dockvault/blob/main/LICENSE)
