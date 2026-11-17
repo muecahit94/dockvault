@@ -792,6 +792,43 @@ func TestEncryptedArchiveSingleFilePinAndRemoteImport(t *testing.T) {
 	}
 }
 
+func TestSecurityFrameAncestorsHeader(t *testing.T) {
+	app, _, _, cleanup := setupTestApp(t)
+	defer cleanup()
+
+	resp, _ := doJSON(t, app, http.MethodGet, "/api/health", nil)
+	if got := resp.Header.Get("X-Frame-Options"); got != "DENY" {
+		t.Fatalf("expected X-Frame-Options=DENY by default, got %q", got)
+	}
+
+	tmp := t.TempDir()
+	db, err := models.InitDB(filepath.Join(tmp, "data"), filepath.Join(tmp, "backups"))
+	if err != nil {
+		t.Fatalf("InitDB: %v", err)
+	}
+	dockerSvc, err := docker.NewService(db, filepath.Join(tmp, "backups"), "alpine:3.21")
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+	schedMgr := scheduler.NewManager(db, dockerSvc)
+	customApp := NewApp(&config.Config{
+		Port:           "8080",
+		DataDir:        filepath.Join(tmp, "data"),
+		BackupDir:      filepath.Join(tmp, "backups"),
+		HelperImage:    "alpine:3.21",
+		FrameAncestors: "https://dashboard.example.com, https://home.example.com",
+	}, db, dockerSvc, schedMgr)
+
+	resp2, _ := doJSON(t, customApp, http.MethodGet, "/api/health", nil)
+	if got := resp2.Header.Get("X-Frame-Options"); got != "" {
+		t.Fatalf("expected X-Frame-Options to be omitted when FrameAncestors set, got %q", got)
+	}
+	wantCSP := "frame-ancestors 'self' https://dashboard.example.com https://home.example.com"
+	if got := resp2.Header.Get("Content-Security-Policy"); got != wantCSP {
+		t.Fatalf("expected CSP %q, got %q", wantCSP, got)
+	}
+}
+
 func itoa(id uint) string {
 	return string(bytes.TrimSpace([]byte(
 		func() string {

@@ -169,6 +169,7 @@ services:
 | `DOCKVAULT_AUTH_PASSWORD` | Optional bootstrap admin password (min 6 chars; enables auth) | _(unset)_ |
 | `DOCKVAULT_TRUSTED_PROXY_HEADER` | Optional reverse-proxy SSO header (e.g., `Remote-User`, `X-authentik-username`) | _(unset)_ |
 | `DOCKVAULT_ENCRYPTION_KEY` | Optional fallback passphrase for AES-256-GCM archive encryption | _(unset)_ |
+| `DOCKVAULT_FRAME_ANCESTORS` | Optional origins allowed to iframe-embed the UI (replaces `X-Frame-Options: DENY`) | _(unset)_ |
 | `TZ` | Timezone used for cron schedule evaluation and logs | `UTC` |
 
 ---
