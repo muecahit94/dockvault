@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.3.0](https://github.com/muecahit94/dockvault/compare/v0.2.1...v0.3.0) (2026-11-17)
+
+
+### Features
+
+* add analytics dashboards, live progress, zstd, excludes, db hot dumps, safe restores, and gitops labels ([e93465d](https://github.com/muecahit94/dockvault/commit/e93465db860785c52514948dd5e729bd782c7bd6))
+* add DOCKVAULT_FRAME_ANCESTORS for iframe embedding ([ee02a5d](https://github.com/muecahit94/dockvault/commit/ee02a5d44907ac0419b7d8fd794152f2f7616724))
+* add DOCKVAULT_FRAME_ANCESTORS for iframe embedding ([b4b88cc](https://github.com/muecahit94/dockvault/commit/b4b88cc07d20af43ef0ff4f7a9bfa28d59f9b050))
+
 ## [0.2.1](https://github.com/muecahit94/dockvault/compare/v0.2.0...v0.2.1) (2026-11-17)
 
 
