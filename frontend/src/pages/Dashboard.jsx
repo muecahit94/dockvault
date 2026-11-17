@@ -1,6 +1,8 @@
+import { useState } from 'react'
 import {
   Activity,
   Archive,
+  BarChart3,
   Bell,
   BellOff,
   CalendarClock,
@@ -10,6 +12,8 @@ import {
   HardDrive,
   Layers,
   Loader2,
+  Lock,
+  ShieldCheck,
   XCircle,
 } from 'lucide-react'
 import {
@@ -47,16 +51,49 @@ function StatusBadge({ status }) {
 }
 
 export function Dashboard({ dashboard, providers = [], notifications = [], onNavigate }) {
+  const [activityRange, setActivityRange] = useState('7d')
   const notifOverview = summarizeNotificationsList(notifications)
   const stats = dashboard?.stats || {}
   const docker = dashboard?.docker || {}
   const recentBackups = dashboard?.recentBackups || []
   const upcomingSchedules = dashboard?.upcomingSchedules || []
   const dailyActivity = dashboard?.dailyActivity || []
+  const storageAnalytics = dashboard?.storageAnalytics || {}
+  const securityOverview = dashboard?.securityOverview || {}
+
+  const windowCount = activityRange === '90d' ? 90 : activityRange === '30d' ? 30 : 7
+  const visibleActivity = dailyActivity.slice(-windowCount)
   const maxDailyRuns = Math.max(
     1,
-    ...dailyActivity.map((d) => (d.success || 0) + (d.failed || 0)),
+    ...visibleActivity.map((d) => (d.success || 0) + (d.failed || 0)),
   )
+  const periodTotals = visibleActivity.reduce(
+    (acc, d) => ({
+      success: acc.success + (d.success || 0),
+      failed: acc.failed + (d.failed || 0),
+      bytes: acc.bytes + (d.bytes || 0),
+    }),
+    { success: 0, failed: 0, bytes: 0 },
+  )
+  const periodRuns = periodTotals.success + periodTotals.failed
+  const periodSuccessRate =
+    periodRuns > 0 ? Math.round((periodTotals.success / periodRuns) * 100) : null
+
+  const providerBreakdown = storageAnalytics.byProvider || []
+  const totalProviderBytes = Math.max(
+    1,
+    providerBreakdown.reduce((sum, p) => sum + (p.totalBytes || 0), 0),
+  )
+  const topTargets = storageAnalytics.byTarget || []
+  const disk = storageAnalytics.disk
+  const diskUsedPct =
+    disk && disk.totalBytes > 0 ? Math.round((disk.usedBytes / disk.totalBytes) * 100) : 0
+  const encPct =
+    securityOverview.totalSuccessfulBackups > 0
+      ? Math.round(
+          ((securityOverview.encryptedBackups || 0) / securityOverview.totalSuccessfulBackups) * 100,
+        )
+      : 0
 
   const statCards = [
     {
@@ -155,57 +192,235 @@ export function Dashboard({ dashboard, providers = [], notifications = [], onNav
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         <div className="lg:col-span-2 space-y-6">
           {dailyActivity.length > 0 && (
-            <Card className="p-5">
-              <div className="flex items-center justify-between mb-4">
+            <Card className="p-5 space-y-4">
+              <div className="flex flex-wrap items-center justify-between gap-3">
                 <div>
-                  <h3 className="text-sm font-semibold text-zinc-100">7-Day Backup Activity</h3>
-                  <p className="text-xs text-zinc-400">Daily successful and failed archive runs</p>
+                  <h3 className="text-sm font-semibold text-zinc-100">
+                    Backup Health &amp; Activity ({windowCount}-Day)
+                  </h3>
+                  <p className="text-xs text-zinc-400">
+                    {periodRuns} run{periodRuns === 1 ? '' : 's'}
+                    {periodSuccessRate !== null ? ` · ${periodSuccessRate}% success` : ''} ·{' '}
+                    {formatBytes(periodTotals.bytes)} archived
+                  </p>
                 </div>
-                <div className="flex items-center gap-3 text-[11px] text-zinc-400">
-                  <span className="flex items-center gap-1.5">
-                    <span className="h-2 w-2 rounded-full bg-emerald-400" /> Success
-                  </span>
-                  <span className="flex items-center gap-1.5">
-                    <span className="h-2 w-2 rounded-full bg-rose-400" /> Failed
-                  </span>
+                <div className="flex items-center gap-2">
+                  <div className="flex items-center rounded-lg border border-zinc-800 bg-zinc-950 p-0.5 text-[11px]">
+                    {[
+                      { id: '7d', label: '7d Bars' },
+                      { id: '30d', label: '30d Map' },
+                      { id: '90d', label: '90d Map' },
+                    ].map((opt) => (
+                      <button
+                        key={opt.id}
+                        type="button"
+                        onClick={() => setActivityRange(opt.id)}
+                        className={`rounded-md px-2 py-1 font-medium transition-colors cursor-pointer ${
+                          activityRange === opt.id
+                            ? 'bg-zinc-800 text-zinc-100'
+                            : 'text-zinc-400 hover:text-zinc-200'
+                        }`}
+                      >
+                        {opt.label}
+                      </button>
+                    ))}
+                  </div>
                 </div>
               </div>
-              <div className="grid grid-cols-7 gap-2 items-end h-28 pt-2">
-                {dailyActivity.map((day) => {
-                  const total = (day.success || 0) + (day.failed || 0)
-                  const successH = Math.round(((day.success || 0) / maxDailyRuns) * 100)
-                  const failedH = Math.round(((day.failed || 0) / maxDailyRuns) * 100)
-                  const label = day.date.slice(5)
-                  return (
-                    <div
-                      key={day.date}
-                      title={`${day.date}: ${day.success} succeeded, ${day.failed} failed (${formatBytes(day.bytes)})`}
-                      className="flex flex-col items-center gap-1.5 h-full justify-end"
-                    >
-                      <div className="text-[10px] text-zinc-500 h-3.5">
-                        {total > 0 ? total : ''}
+
+              {activityRange === '7d' ? (
+                <div className="grid grid-cols-7 gap-2 items-end h-28 pt-2">
+                  {visibleActivity.map((day) => {
+                    const total = (day.success || 0) + (day.failed || 0)
+                    const successH = Math.round(((day.success || 0) / maxDailyRuns) * 100)
+                    const failedH = Math.round(((day.failed || 0) / maxDailyRuns) * 100)
+                    const label = day.date.slice(5)
+                    return (
+                      <div
+                        key={day.date}
+                        title={`${day.date}: ${day.success} succeeded, ${day.failed} failed (${formatBytes(day.bytes)})`}
+                        className="flex flex-col items-center gap-1.5 h-full justify-end"
+                      >
+                        <div className="text-[10px] text-zinc-500 h-3.5">
+                          {total > 0 ? total : ''}
+                        </div>
+                        <div className="w-full max-w-[34px] flex-1 rounded-md bg-zinc-950/80 border border-zinc-800/70 p-0.5 flex flex-col justify-end gap-0.5 overflow-hidden">
+                          {day.failed > 0 && (
+                            <div
+                              style={{ height: `${Math.max(failedH, 12)}%` }}
+                              className="w-full rounded-xs bg-rose-500/80"
+                            />
+                          )}
+                          {day.success > 0 && (
+                            <div
+                              style={{ height: `${Math.max(successH, 12)}%` }}
+                              className="w-full rounded-xs bg-emerald-500/80"
+                            />
+                          )}
+                        </div>
+                        <div className="font-mono text-[10px] text-zinc-400">{label}</div>
                       </div>
-                      <div className="w-full max-w-[34px] flex-1 rounded-md bg-zinc-950/80 border border-zinc-800/70 p-0.5 flex flex-col justify-end gap-0.5 overflow-hidden">
-                        {day.failed > 0 && (
-                          <div
-                            style={{ height: `${Math.max(failedH, 12)}%` }}
-                            className="w-full rounded-xs bg-rose-500/80"
-                          />
-                        )}
-                        {day.success > 0 && (
-                          <div
-                            style={{ height: `${Math.max(successH, 12)}%` }}
-                            className="w-full rounded-xs bg-emerald-500/80"
-                          />
-                        )}
-                      </div>
-                      <div className="font-mono text-[10px] text-zinc-400">{label}</div>
+                    )
+                  })}
+                </div>
+              ) : (
+                <div className="space-y-2.5">
+                  <div
+                    className={`grid gap-1.5 ${
+                      activityRange === '90d' ? 'grid-cols-15 sm:grid-cols-18' : 'grid-cols-10 sm:grid-cols-15'
+                    }`}
+                  >
+                    {visibleActivity.map((day) => {
+                      let cellClass = 'border-zinc-800/80 bg-zinc-950/70'
+                      if (day.failed > 0 && day.success === 0) {
+                        cellClass = 'border-rose-500/50 bg-rose-500/70'
+                      } else if (day.failed > 0 && day.success > 0) {
+                        cellClass = 'border-amber-500/50 bg-amber-500/70'
+                      } else if (day.success >= 3) {
+                        cellClass = 'border-emerald-400/60 bg-emerald-500'
+                      } else if (day.success > 0) {
+                        cellClass = 'border-emerald-500/40 bg-emerald-500/45'
+                      }
+                      return (
+                        <div
+                          key={day.date}
+                          title={`${day.date}: ${day.success} succeeded, ${day.failed} failed (${formatBytes(day.bytes)})`}
+                          className={`h-5 rounded border transition-transform hover:scale-110 ${cellClass}`}
+                        />
+                      )
+                    })}
+                  </div>
+                  <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] text-zinc-400">
+                    <span>
+                      {visibleActivity[0]?.date} → {visibleActivity[visibleActivity.length - 1]?.date}
+                    </span>
+                    <div className="flex items-center gap-3">
+                      <span className="flex items-center gap-1">
+                        <span className="h-2.5 w-2.5 rounded-xs border border-zinc-800 bg-zinc-950" /> Idle
+                      </span>
+                      <span className="flex items-center gap-1">
+                        <span className="h-2.5 w-2.5 rounded-xs bg-emerald-500/60" /> Healthy
+                      </span>
+                      <span className="flex items-center gap-1">
+                        <span className="h-2.5 w-2.5 rounded-xs bg-amber-500/80" /> Mixed
+                      </span>
+                      <span className="flex items-center gap-1">
+                        <span className="h-2.5 w-2.5 rounded-xs bg-rose-500/80" /> Failed
+                      </span>
                     </div>
-                  )
-                })}
-              </div>
+                  </div>
+                </div>
+              )}
             </Card>
           )}
+
+          {/* Storage Analytics & Growth */}
+          <Card className="p-5 space-y-4">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="flex items-center gap-2">
+                <BarChart3 className="h-4 w-4 text-sky-400" />
+                <div>
+                  <h3 className="text-sm font-semibold text-zinc-100">Storage Analytics &amp; Footprint</h3>
+                  <p className="text-xs text-zinc-400">
+                    Host disk headroom, storage distribution, and top backup consumers
+                  </p>
+                </div>
+              </div>
+              {storageAnalytics.compression && (
+                <div className="flex items-center gap-1.5 text-[11px]">
+                  <Badge variant="neutral">gzip: {storageAnalytics.compression.gzip ?? 0}</Badge>
+                  <Badge variant="info">zstd: {storageAnalytics.compression.zstd ?? 0}</Badge>
+                </div>
+              )}
+            </div>
+
+            {disk && disk.totalBytes > 0 && (
+              <div className="rounded-xl border border-zinc-800 bg-zinc-950/60 p-3 space-y-2">
+                <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
+                  <span className="text-zinc-300 font-medium">
+                    Backup Volume Host Disk (<span className="font-mono text-zinc-400">{disk.path}</span>)
+                  </span>
+                  <span className="font-mono text-zinc-200">
+                    {formatBytes(disk.freeBytes)} free · {diskUsedPct}% used of {formatBytes(disk.totalBytes)}
+                  </span>
+                </div>
+                <div className="h-2 w-full overflow-hidden rounded-full bg-zinc-900">
+                  <div
+                    style={{ width: `${Math.min(diskUsedPct, 100)}%` }}
+                    className={`h-full rounded-full ${
+                      diskUsedPct >= 90
+                        ? 'bg-rose-500'
+                        : diskUsedPct >= 75
+                          ? 'bg-amber-500'
+                          : 'bg-sky-500'
+                    }`}
+                  />
+                </div>
+              </div>
+            )}
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div className="rounded-xl border border-zinc-800 bg-zinc-950/60 p-3 space-y-2.5">
+                <div className="text-[11px] font-medium uppercase tracking-wider text-zinc-400">
+                  By Storage Destination
+                </div>
+                {providerBreakdown.length === 0 ? (
+                  <p className="text-xs text-zinc-500">No storage providers configured.</p>
+                ) : (
+                  providerBreakdown.map((p) => {
+                    const pct = Math.round(((p.totalBytes || 0) / totalProviderBytes) * 100)
+                    return (
+                      <div key={p.providerId} className="space-y-1 text-xs">
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="flex items-center gap-1.5 min-w-0 font-medium text-zinc-200">
+                            <span className="truncate">{p.name}</span>
+                            {p.encrypted && <Lock className="h-3 w-3 text-sky-400 shrink-0" />}
+                          </span>
+                          <span className="shrink-0 font-mono text-[11px] text-zinc-400">
+                            {formatBytes(p.totalBytes)} ({p.backupCount})
+                          </span>
+                        </div>
+                        <div className="h-1.5 w-full overflow-hidden rounded-full bg-zinc-900">
+                          <div
+                            style={{ width: `${Math.max(pct, p.totalBytes > 0 ? 4 : 0)}%` }}
+                            className="h-full rounded-full bg-sky-500/80"
+                          />
+                        </div>
+                      </div>
+                    )
+                  })
+                )}
+              </div>
+
+              <div className="rounded-xl border border-zinc-800 bg-zinc-950/60 p-3 space-y-2">
+                <div className="text-[11px] font-medium uppercase tracking-wider text-zinc-400">
+                  Top Space Consumers
+                </div>
+                {topTargets.length === 0 ? (
+                  <p className="text-xs text-zinc-500">Run backups to track size per stack or volume.</p>
+                ) : (
+                  <div className="space-y-1.5 text-xs">
+                    {topTargets.slice(0, 5).map((t) => (
+                      <div
+                        key={`${t.targetType}-${t.targetName}`}
+                        className="flex items-center justify-between gap-2"
+                      >
+                        <span className="flex items-center gap-1.5 min-w-0">
+                          <Badge variant="neutral" className="text-[10px] py-0 px-1.5">
+                            {t.targetType}
+                          </Badge>
+                          <span className="truncate text-zinc-200">{t.targetName}</span>
+                        </span>
+                        <span className="shrink-0 font-mono text-[11px] text-zinc-400">
+                          {formatBytes(t.totalBytes)} ({t.backupCount}×)
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+          </Card>
 
           <Card className="p-5">
             <div className="flex items-center justify-between mb-4">
@@ -334,6 +549,59 @@ export function Dashboard({ dashboard, providers = [], notifications = [], onNav
                   </div>
                 </div>
               ))}
+            </div>
+          </Card>
+
+          <Card className="p-5">
+            <div className="flex items-center justify-between mb-3">
+              <div className="flex items-center gap-2">
+                <ShieldCheck className="h-4 w-4 text-emerald-400 shrink-0" />
+                <div>
+                  <h3 className="text-sm font-semibold text-zinc-100">Encryption &amp; Security Health</h3>
+                  <p className="text-xs text-zinc-400">Access control &amp; archive protection</p>
+                </div>
+              </div>
+              <Button variant="ghost" size="sm" onClick={() => onNavigate('settings', 'security')}>
+                Review
+              </Button>
+            </div>
+            <div className="rounded-xl border border-zinc-800 bg-zinc-950/60 p-3 space-y-2 text-xs">
+              <div className="flex items-center justify-between">
+                <span className="text-zinc-400">Authentication</span>
+                <Badge variant={securityOverview.authEnabled ? 'success' : 'warning'}>
+                  {securityOverview.authEnabled
+                    ? securityOverview.authMode === 'proxy'
+                      ? 'Proxy SSO'
+                      : 'Built-in Auth'
+                    : 'Open (No Login)'}
+                </Badge>
+              </div>
+              <div className="flex items-center justify-between">
+                <span className="text-zinc-400">Encrypted Destinations</span>
+                <Badge
+                  variant={(securityOverview.encryptedProviders || 0) > 0 ? 'info' : 'neutral'}
+                >
+                  {securityOverview.encryptedProviders ?? 0} / {securityOverview.totalProviders ?? 0}
+                </Badge>
+              </div>
+              <div className="flex items-center justify-between">
+                <span className="text-zinc-400">Encrypted Snapshots</span>
+                <span className="font-mono text-zinc-200">
+                  {securityOverview.encryptedBackups ?? 0} / {securityOverview.totalSuccessfulBackups ?? 0} ({encPct}%)
+                </span>
+              </div>
+              <div className="flex items-center justify-between">
+                <span className="text-zinc-400">Global Fallback Key</span>
+                <Badge variant={securityOverview.globalKeyConfigured ? 'success' : 'neutral'}>
+                  {securityOverview.globalKeyConfigured ? 'Configured' : 'Per-Provider Only'}
+                </Badge>
+              </div>
+              <div className="flex items-center justify-between">
+                <span className="text-zinc-400">Transport / Cookie</span>
+                <Badge variant={securityOverview.httpsActive ? 'success' : 'neutral'}>
+                  {securityOverview.httpsActive ? 'HTTPS Secure' : 'HTTP Local'}
+                </Badge>
+              </div>
             </div>
           </Card>
 

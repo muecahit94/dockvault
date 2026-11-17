@@ -135,7 +135,7 @@ func (d *S3Driver) List(ctx context.Context) ([]RemoteObject, error) {
 			return nil, fmt.Errorf("list S3 objects: %w", obj.Err)
 		}
 		name := path.Base(obj.Key)
-		if !strings.HasSuffix(name, ".tar.gz") && !strings.HasSuffix(name, ".tar.gz.enc") {
+		if !IsBackupArchiveName(name) {
 			continue
 		}
 		out = append(out, RemoteObject{

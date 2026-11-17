@@ -27,8 +27,8 @@ Automatically discover running containers, Compose stacks, and named volumes—b
   <a href="https://github.com/muecahit94/dockvault/stargazers">
     <img src="https://img.shields.io/github/stars/muecahit94/dockvault?label=stars&logo=github&color=007ec6" alt="GitHub Stars" />
   </a>
-  <a href="LICENSE">
-    <img src="https://img.shields.io/github/license/muecahit94/dockvault?color=007ec6" alt="License" />
+  <a href="https://github.com/muecahit94/dockvault/blob/main/LICENSE">
+    <img src="https://img.shields.io/badge/license-MIT-007ec6" alt="License" />
   </a>
 </p>
 
@@ -128,9 +128,9 @@ docker compose up -d
 
 ---
 
-## Container Labels (Hooks & Exclusions)
+### Container Labels (GitOps Auto-Schedules, Exclusions & Hooks)
 
-Add optional Docker labels to your containers in `docker-compose.yaml` to customize backup behavior automatically:
+Add optional Docker labels to your containers in `docker-compose.yaml` to declare backup policies and hooks declaratively:
 
 ```yaml
 services:
@@ -138,10 +138,12 @@ services:
     image: postgres:16-alpine
     volumes:
       - pgdata:/var/lib/postgresql/data
-      - ./pg-dumps:/dumps
     labels:
-      - dockvault.pre-backup=pg_dumpall -U postgres > /dumps/all.sql
-      - dockvault.post-backup=rm -f /dumps/all.sql
+      - dockvault.schedule=0 3 * * *
+      - dockvault.compression=zstd
+      - dockvault.db-dump=true
+      - dockvault.retention=14
+      - dockvault.exclude-paths=*.tmp,pg_wal/**
 
   cache:
     image: redis:7-alpine
@@ -151,6 +153,11 @@ services:
 
 | Label | Description |
 |-------|-------------|
+| `dockvault.schedule` | Cron expression used by **Sync GitOps Labels** / startup sync to auto-create and update managed schedules |
+| `dockvault.exclude-paths` | Comma- or semicolon-separated `tar --exclude` glob patterns (e.g. `**/cache/**,*.log`) |
+| `dockvault.compression` | Preferred archive compression (`gzip` or `zstd`) |
+| `dockvault.retention` | Keep count for GitOps-managed schedules (default `7`) |
+| `dockvault.db-dump` | Set `true` / `false` to enable or disable zero-downtime DB hot dumps (`postgres`, `mysql`, `mariadb`, `mongodb`, `redis`) |
 | `dockvault.pre-backup` | Shell command executed inside the container (`sh -c ...`) before pausing and archiving |
 | `dockvault.post-backup` | Shell command executed inside the container after unpausing (runs even if archiving fails) |
 | `dockvault.exclude=true` | Excludes a container from DockVault discovery (`dockvault.enable=false` is also supported) |
@@ -214,4 +221,4 @@ npm run dev
 
 ## License
 
-[MIT](LICENSE)
+[MIT](https://github.com/muecahit94/dockvault/blob/main/LICENSE)

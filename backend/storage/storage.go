@@ -77,3 +77,11 @@ func SafeFileName(name string) (string, error) {
 	}
 	return cleaned, nil
 }
+
+// IsBackupArchiveName reports whether a filename matches a DockVault archive (.tar.gz/.tar.zst, optionally .enc).
+func IsBackupArchiveName(name string) bool {
+	return strings.HasSuffix(name, ".tar.gz") ||
+		strings.HasSuffix(name, ".tar.gz.enc") ||
+		strings.HasSuffix(name, ".tar.zst") ||
+		strings.HasSuffix(name, ".tar.zst.enc")
+}

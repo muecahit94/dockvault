@@ -38,6 +38,9 @@ export function ScheduleModal({
   const [keepMonthly, setKeepMonthly] = useState(3)
   const [preCommand, setPreCommand] = useState('')
   const [postCommand, setPostCommand] = useState('')
+  const [compression, setCompression] = useState('gzip')
+  const [excludePatterns, setExcludePatterns] = useState('')
+  const [dbHotDump, setDbHotDump] = useState(false)
   const [pauseContainer, setPauseContainer] = useState(true)
   const [enabled, setEnabled] = useState(true)
   const [preview, setPreview] = useState({ valid: true, nextRunAt: null, error: '' })
@@ -61,13 +64,16 @@ export function ScheduleModal({
       setKeepMonthly(existingSchedule.keepMonthly ?? 3)
       setPreCommand(existingSchedule.preCommand || '')
       setPostCommand(existingSchedule.postCommand || '')
+      setCompression(existingSchedule.compression || 'gzip')
+      setExcludePatterns(existingSchedule.excludePatterns || '')
+      setDbHotDump(Boolean(existingSchedule.dbHotDump))
       setPauseContainer(existingSchedule.pauseContainer ?? true)
       setEnabled(existingSchedule.enabled ?? true)
     } else if (initialTarget) {
       setName(`${initialTarget.targetName} Backup`)
       setTargetType(initialTarget.targetType)
       setTargetId(initialTarget.targetId)
-      setCronExpr('0 2 * * *')
+      setCronExpr(initialTarget.gitopsSchedule || '0 2 * * *')
       setStorageProviderId(String(defaultProvider?.id || ''))
       setSecondaryStorageId('')
       setRetentionPolicy('count')
@@ -77,6 +83,11 @@ export function ScheduleModal({
       setKeepMonthly(3)
       setPreCommand('')
       setPostCommand('')
+      setCompression(initialTarget.gitopsCompression || 'gzip')
+      setExcludePatterns(initialTarget.gitopsExcludePaths || '')
+      setDbHotDump(
+        Boolean(initialTarget.detectedDb || initialTarget.detectedDbs?.length),
+      )
       setPauseContainer(defaultPauseBackups)
       setEnabled(true)
     } else {
@@ -102,6 +113,9 @@ export function ScheduleModal({
       setKeepMonthly(3)
       setPreCommand('')
       setPostCommand('')
+      setCompression('gzip')
+      setExcludePatterns('')
+      setDbHotDump(false)
       setPauseContainer(defaultPauseBackups)
       setEnabled(true)
     }
@@ -163,6 +177,9 @@ export function ScheduleModal({
         keepMonthly: Number(keepMonthly) || 0,
         preCommand: preCommand.trim(),
         postCommand: postCommand.trim(),
+        compression,
+        excludePatterns: excludePatterns.trim(),
+        dbHotDump,
         pauseContainer,
         enabled,
       }
@@ -392,6 +409,30 @@ export function ScheduleModal({
           )}
         </div>
 
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          <div>
+            <Label htmlFor="sched-compression">Archive Compression</Label>
+            <Select
+              id="sched-compression"
+              value={compression}
+              onChange={(e) => setCompression(e.target.value)}
+            >
+              <option value="gzip">gzip (.tar.gz — Universal)</option>
+              <option value="zstd">zstd (.tar.zst — Faster &amp; Smaller)</option>
+            </Select>
+          </div>
+          <div>
+            <Label htmlFor="sched-excludes">Exclude Patterns (optional)</Label>
+            <Input
+              id="sched-excludes"
+              value={excludePatterns}
+              onChange={(e) => setExcludePatterns(e.target.value)}
+              placeholder="*.log, **/cache/**, node_modules"
+              className="font-mono text-xs"
+            />
+          </div>
+        </div>
+
         {targetType !== 'volume' && (
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <div>
@@ -419,10 +460,18 @@ export function ScheduleModal({
 
         <div className="space-y-2">
           {targetType !== 'volume' && (
-            <div className="flex items-center justify-between rounded-xl border border-zinc-800 bg-zinc-950/50 px-3.5 py-2.5">
-              <span className="text-xs text-zinc-200">Pause running container(s) during backup</span>
-              <Switch checked={pauseContainer} onChange={setPauseContainer} />
-            </div>
+            <>
+              <div className="flex items-center justify-between rounded-xl border border-zinc-800 bg-zinc-950/50 px-3.5 py-2.5">
+                <span className="text-xs text-zinc-200">
+                  Zero-downtime database hot dumps (auto-detect postgres/mysql/mariadb/mongo/redis)
+                </span>
+                <Switch checked={dbHotDump} onChange={setDbHotDump} />
+              </div>
+              <div className="flex items-center justify-between rounded-xl border border-zinc-800 bg-zinc-950/50 px-3.5 py-2.5">
+                <span className="text-xs text-zinc-200">Pause running container(s) during backup</span>
+                <Switch checked={pauseContainer} onChange={setPauseContainer} />
+              </div>
+            </>
           )}
           <div className="flex items-center justify-between rounded-xl border border-zinc-800 bg-zinc-950/50 px-3.5 py-2.5">
             <span className="text-xs text-zinc-200">Schedule enabled</span>

@@ -121,6 +121,10 @@ type BackupSchedule struct {
 	KeepMonthly              int              `json:"keepMonthly"`
 	PreCommand               string           `gorm:"size:512" json:"preCommand,omitempty"`
 	PostCommand              string           `gorm:"size:512" json:"postCommand,omitempty"`
+	ExcludePatterns          string           `gorm:"type:text" json:"excludePatterns,omitempty"`
+	Compression              string           `gorm:"size:16;default:'gzip'" json:"compression"`
+	DBHotDump                bool             `json:"dbHotDump"`
+	ManagedByLabel           bool             `json:"managedByLabel,omitempty"`
 	Enabled                  bool             `json:"enabled"`
 	LastRunAt                *time.Time       `json:"lastRunAt"`
 	LastStatus               string           `gorm:"size:20" json:"lastStatus"`
@@ -140,6 +144,8 @@ type BackupLog struct {
 	StorageProviderName  string     `gorm:"size:120" json:"storageProviderName"`
 	StorageType          string     `gorm:"size:20" json:"storageType"`
 	AccessTier           string     `gorm:"size:32" json:"accessTier,omitempty"`
+	Compression          string     `gorm:"size:16" json:"compression,omitempty"`
+	ExcludePatterns      string     `gorm:"type:text" json:"excludePatterns,omitempty"`
 	Encrypted            bool       `json:"encrypted"`
 	Pinned               bool       `gorm:"index" json:"pinned"`
 	Status               string     `gorm:"size:20;not null;index" json:"status"` // "running", "success", "failed"
@@ -150,6 +156,7 @@ type BackupLog struct {
 	VolumeCount          int        `json:"volumeCount"`
 	VolumesJSON          string     `gorm:"type:text" json:"volumesJson"`
 	PausedContainersJSON string     `gorm:"type:text" json:"pausedContainersJson"`
+	StepsJSON            string     `gorm:"type:text" json:"stepsJson,omitempty"`
 	DurationMs           int64      `json:"durationMs"`
 	ErrorMessage         string     `gorm:"type:text" json:"errorMessage"`
 	StartedAt            time.Time  `gorm:"index" json:"startedAt"`

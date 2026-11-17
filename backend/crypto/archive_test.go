@@ -55,3 +55,33 @@ func TestEncryptAndDecryptRoundTrip(t *testing.T) {
 		}
 	}
 }
+
+func TestCompressionRoundTrip(t *testing.T) {
+	payload := bytes.Repeat([]byte("dockvault-zstd-gzip-roundtrip-"), 1500)
+	for _, algo := range []string{"gzip", "zstd"} {
+		var buf bytes.Buffer
+		cw, err := NewCompressedWriter(&buf, algo)
+		if err != nil {
+			t.Fatalf("%s writer: %v", algo, err)
+		}
+		if _, err := cw.Write(payload); err != nil {
+			t.Fatalf("%s write: %v", algo, err)
+		}
+		if err := cw.Close(); err != nil {
+			t.Fatalf("%s close: %v", algo, err)
+		}
+
+		dr, err := OpenCompressedReader(bytes.NewReader(buf.Bytes()), "")
+		if err != nil {
+			t.Fatalf("%s OpenCompressedReader: %v", algo, err)
+		}
+		got, err := io.ReadAll(dr)
+		_ = dr.Close()
+		if err != nil {
+			t.Fatalf("%s read: %v", algo, err)
+		}
+		if !bytes.Equal(got, payload) {
+			t.Fatalf("%s roundtrip mismatch: got %d, want %d", algo, len(got), len(payload))
+		}
+	}
+}

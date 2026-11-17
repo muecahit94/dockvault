@@ -1,8 +1,77 @@
-import { CalendarClock, Edit2, Play, Plus, Trash2 } from 'lucide-react'
+import { useMemo, useState } from 'react'
+import { CalendarClock, Clock, Edit2, Play, Plus, RefreshCw, Trash2 } from 'lucide-react'
 import { api, formatDateTime, formatRelativeTime } from '../api/client'
 import { Badge, Button, Card, EmptyState, Switch } from '../components/ui'
 
+function extractCronHours(expr) {
+  const raw = (expr || '').trim().toLowerCase()
+  if (!raw) return []
+  if (raw === '@hourly' || raw === '@every 1h') {
+    return Array.from({ length: 24 }, (_, i) => i)
+  }
+  if (raw === '@daily' || raw === '@midnight') return [0]
+  if (raw.startsWith('@every ')) {
+    const m = raw.match(/@every\s+(\d+)h/)
+    if (m) {
+      const step = Math.max(1, Number(m[1]))
+      return Array.from({ length: 24 }, (_, i) => i).filter((h) => h % step === 0)
+    }
+    return []
+  }
+  const fields = raw.split(/\s+/)
+  if (fields.length < 5) return []
+  const hourField = fields[1]
+  if (hourField === '*') return Array.from({ length: 24 }, (_, i) => i)
+  const hours = new Set()
+  for (const part of hourField.split(',')) {
+    if (part.startsWith('*/')) {
+      const step = Math.max(1, Number(part.slice(2)))
+      for (let h = 0; h < 24; h += step) hours.add(h)
+    } else if (part.includes('-')) {
+      const [a, b] = part.split('-').map(Number)
+      if (!Number.isNaN(a) && !Number.isNaN(b)) {
+        for (let h = Math.max(0, a); h <= Math.min(23, b); h++) hours.add(h)
+      }
+    } else {
+      const n = Number(part)
+      if (!Number.isNaN(n) && n >= 0 && n <= 23) hours.add(n)
+    }
+  }
+  return Array.from(hours).sort((a, b) => a - b)
+}
+
 export function Schedules({ schedules, onCreate, onEdit, onRefresh, notify }) {
+  const [syncingLabels, setSyncingLabels] = useState(false)
+
+  const timelineHours = useMemo(() => {
+    const buckets = Array.from({ length: 24 }, (_, hour) => ({ hour, jobs: [] }))
+    for (const s of schedules) {
+      if (!s.enabled) continue
+      const hrs = extractCronHours(s.cronExpr)
+      for (const h of hrs) {
+        buckets[h].jobs.push(s)
+      }
+    }
+    return buckets
+  }, [schedules])
+
+  const overlappingHours = timelineHours.filter((b) => b.jobs.length > 1)
+
+  async function handleSyncGitOps() {
+    setSyncingLabels(true)
+    try {
+      const res = await api.syncGitOpsSchedules()
+      notify(
+        'success',
+        `GitOps label sync: ${res.created || 0} created, ${res.updated || 0} updated, ${res.skipped || 0} skipped`,
+      )
+      onRefresh()
+    } catch (err) {
+      notify('error', `GitOps sync failed: ${err.message}`)
+    } finally {
+      setSyncingLabels(false)
+    }
+  }
   async function handleToggle(sched) {
     try {
       await api.toggleSchedule(sched.id)
@@ -36,18 +105,79 @@ export function Schedules({ schedules, onCreate, onEdit, onRefresh, notify }) {
 
   return (
     <div className="space-y-5">
-      <div className="flex items-center justify-between">
+      <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <h2 className="text-lg font-semibold text-zinc-100">Backup Schedules</h2>
           <p className="text-xs text-zinc-400">
-            Automated cron jobs with configurable retention policies
+            Automated cron jobs with configurable retention policies &amp; GitOps label sync
           </p>
         </div>
-        <Button onClick={onCreate}>
-          <Plus className="h-4 w-4" />
-          New Schedule
-        </Button>
+        <div className="flex items-center gap-2">
+          <Button variant="outline" size="sm" onClick={handleSyncGitOps} disabled={syncingLabels}>
+            <RefreshCw className={`h-3.5 w-3.5 ${syncingLabels ? 'animate-spin' : ''}`} />
+            {syncingLabels ? 'Syncing...' : 'Sync GitOps Labels'}
+          </Button>
+          <Button onClick={onCreate}>
+            <Plus className="h-4 w-4" />
+            New Schedule
+          </Button>
+        </div>
       </div>
+
+      {schedules.length > 0 && (
+        <Card className="p-4 space-y-3">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="flex items-center gap-2">
+              <Clock className="h-4 w-4 text-sky-400" />
+              <div>
+                <h3 className="text-xs font-semibold text-zinc-100">24-Hour Cron Schedule Timeline</h3>
+                <p className="text-[11px] text-zinc-400">
+                  Hourly run distribution for active jobs to help avoid backup I/O collisions
+                </p>
+              </div>
+            </div>
+            {overlappingHours.length > 0 ? (
+              <Badge variant="warning">
+                {overlappingHours.length} overlapping hour(s):{' '}
+                {overlappingHours.map((b) => `${String(b.hour).padStart(2, '0')}:00`).join(', ')}
+              </Badge>
+            ) : (
+              <Badge variant="success">No hourly collisions</Badge>
+            )}
+          </div>
+          <div className="grid grid-cols-12 sm:grid-cols-24 gap-1">
+            {timelineHours.map((slot) => {
+              const count = slot.jobs.length
+              const title =
+                count > 0
+                  ? `${String(slot.hour).padStart(2, '0')}:00 — ${slot.jobs.map((j) => j.name).join(', ')}`
+                  : `${String(slot.hour).padStart(2, '0')}:00 — idle`
+              return (
+                <div
+                  key={slot.hour}
+                  title={title}
+                  className="flex flex-col items-center gap-1"
+                >
+                  <div
+                    className={`h-7 w-full rounded border flex items-center justify-center font-mono text-[10px] ${
+                      count === 0
+                        ? 'border-zinc-800/80 bg-zinc-950/60 text-zinc-600'
+                        : count === 1
+                          ? 'border-emerald-500/40 bg-emerald-500/15 text-emerald-300 font-semibold'
+                          : 'border-amber-500/50 bg-amber-500/20 text-amber-300 font-semibold'
+                    }`}
+                  >
+                    {count > 0 ? count : ''}
+                  </div>
+                  <span className="font-mono text-[9px] text-zinc-500">
+                    {slot.hour % 3 === 0 ? String(slot.hour).padStart(2, '0') : ''}
+                  </span>
+                </div>
+              )
+            })}
+          </div>
+        </Card>
+      )}
 
       {schedules.length === 0 ? (
         <EmptyState
@@ -83,7 +213,24 @@ export function Schedules({ schedules, onCreate, onEdit, onRefresh, notify }) {
                       <Switch checked={s.enabled} onChange={() => handleToggle(s)} />
                     </td>
                     <td className="px-4 py-3.5">
-                      <div className="font-medium text-zinc-100">{s.name}</div>
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        <span className="font-medium text-zinc-100">{s.name}</span>
+                        {s.managedByLabel && (
+                          <Badge variant="info" className="text-[10px] py-0 px-1.5">
+                            GitOps
+                          </Badge>
+                        )}
+                        {s.compression === 'zstd' && (
+                          <Badge variant="neutral" className="text-[10px] py-0 px-1.5">
+                            ZSTD
+                          </Badge>
+                        )}
+                        {s.dbHotDump && (
+                          <Badge variant="success" className="text-[10px] py-0 px-1.5">
+                            DB Dump
+                          </Badge>
+                        )}
+                      </div>
                       <div className="mt-0.5 text-xs text-zinc-500">
                         {s.lastRunAt ? (
                           <span>

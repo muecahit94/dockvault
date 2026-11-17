@@ -21,6 +21,7 @@ import {
   XCircle,
 } from 'lucide-react'
 import { api, formatBytes, formatDateTime, formatDuration } from '../api/client'
+import { JobStepsList } from '../components/LiveProgressDrawer'
 import { Badge, Button, Card, EmptyState, Input, Modal, Select, Switch } from '../components/ui'
 
 function StatusBadge({ status }) {
@@ -65,10 +66,14 @@ export function History({ backups, loading, onRefresh, notify }) {
   const [inspectItem, setInspectItem] = useState(null)
   const [inspectLoading, setInspectLoading] = useState(false)
   const [inspectData, setInspectData] = useState(null)
+  const [inspectSteps, setInspectSteps] = useState([])
   const [verifyLoading, setVerifyLoading] = useState(false)
   const [verifyResult, setVerifyResult] = useState(null)
 
   const [restoreItem, setRestoreItem] = useState(null)
+  const [restoreMode, setRestoreMode] = useState('inplace') // 'inplace' | 'staging'
+  const [restoreVolumeName, setRestoreVolumeName] = useState('')
+  const [restorePreSnap, setRestorePreSnap] = useState(true)
   const [restorePause, setRestorePause] = useState(true)
   const [restoring, setRestoring] = useState(false)
 
@@ -135,13 +140,20 @@ export function History({ backups, loading, onRefresh, notify }) {
   async function openInspect(item) {
     setInspectItem(item)
     setInspectData(null)
+    setInspectSteps(parseJSONList(item.stepsJson))
     setVerifyResult(null)
     if (item.status !== 'success') return
 
     setInspectLoading(true)
     try {
-      const res = await api.inspectBackup(item.id)
+      const [res, progRes] = await Promise.all([
+        api.inspectBackup(item.id),
+        api.getBackupProgress(item.id).catch(() => null),
+      ])
       setInspectData(res)
+      if (progRes?.job?.steps?.length) {
+        setInspectSteps(progRes.job.steps)
+      }
     } catch (err) {
       notify('error', err.message)
     } finally {
@@ -169,14 +181,32 @@ export function History({ backups, loading, onRefresh, notify }) {
   async function handleRestore(e) {
     e.preventDefault()
     if (!restoreItem) return
+    if (restoreMode === 'staging' && !restoreVolumeName.trim()) {
+      notify('error', 'Enter a staging volume name')
+      return
+    }
     setRestoring(true)
     try {
-      const res = await api.restoreBackup(restoreItem.id, restorePause)
-      notify(
-        'success',
-        `Restored ${res.restoredMounts} mount(s) for ${res.targetName} in ${formatDuration(res.durationMs)}`,
-      )
+      const res = await api.restoreBackup(restoreItem.id, {
+        pauseContainer: restoreMode === 'inplace' ? restorePause : false,
+        targetVolumeName: restoreMode === 'staging' ? restoreVolumeName.trim() : '',
+        preRestoreBackup: restoreMode === 'inplace' ? restorePreSnap : false,
+      })
+      if (res.restoredVolume) {
+        notify(
+          'success',
+          `Extracted archive into staging volume "${res.restoredVolume}" in ${formatDuration(res.durationMs)}`,
+        )
+      } else {
+        notify(
+          'success',
+          `Restored ${res.restoredMounts} mount(s) for ${res.targetName} in ${formatDuration(res.durationMs)}${
+            res.preRestoreBackupId ? ' (safety snapshot saved)' : ''
+          }`,
+        )
+      }
       setRestoreItem(null)
+      onRefresh()
     } catch (err) {
       notify('error', `Restore failed: ${err.message}`)
     } finally {
@@ -265,6 +295,11 @@ export function History({ backups, loading, onRefresh, notify }) {
                         <div>
                           <div className="flex items-center gap-1.5 font-mono text-xs text-zinc-200">
                             <span>{b.fileName}</span>
+                            {(b.compression === 'zstd' || b.fileName?.includes('.tar.zst')) && (
+                              <Badge variant="neutral" className="text-[10px] py-0 px-1.5">
+                                ZSTD
+                              </Badge>
+                            )}
                             {b.encrypted && (
                               <Badge variant="info" className="text-[10px] py-0 px-1.5">
                                 <Lock className="h-2.5 w-2.5" />
@@ -346,6 +381,10 @@ export function History({ backups, loading, onRefresh, notify }) {
                               size="sm"
                               title="Restore volumes from this archive"
                               onClick={() => {
+                                const slug = (b.targetName || 'backup').toLowerCase().replace(/[^a-z0-9_-]+/g, '-')
+                                setRestoreMode('inplace')
+                                setRestoreVolumeName(`${slug}-restored`)
+                                setRestorePreSnap(true)
                                 setRestorePause(true)
                                 setRestoreItem(b)
                               }}
@@ -497,6 +536,15 @@ export function History({ backups, loading, onRefresh, notify }) {
                 </div>
               )}
             </div>
+
+            {inspectSteps.length > 0 && (
+              <div className="space-y-2 pt-1">
+                <div className="text-xs font-medium text-zinc-300">Job Step Timeline</div>
+                <div className="max-h-48 overflow-y-auto pr-1">
+                  <JobStepsList steps={inspectSteps} />
+                </div>
+              </div>
+            )}
           </div>
         )}
       </Modal>
@@ -510,29 +558,89 @@ export function History({ backups, loading, onRefresh, notify }) {
       >
         {restoreItem && (
           <form onSubmit={handleRestore} className="space-y-4">
-            <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 p-3 text-xs text-amber-200 flex items-start gap-2.5">
-              <AlertTriangle className="h-4 w-4 shrink-0 mt-0.5 text-amber-400" />
-              <div>
-                Restoring extracts <span className="font-mono">{restoreItem.fileName}</span> directly into
-                the original Docker volume(s) / bind mounts, overwriting existing files with matching paths.
-              </div>
+            <div className="grid grid-cols-2 gap-2 rounded-xl border border-zinc-800 bg-zinc-950/70 p-1">
+              <button
+                type="button"
+                onClick={() => setRestoreMode('inplace')}
+                className={`rounded-lg px-3 py-2 text-xs font-medium transition-colors cursor-pointer ${
+                  restoreMode === 'inplace'
+                    ? 'bg-zinc-800 text-zinc-100'
+                    : 'text-zinc-400 hover:text-zinc-200'
+                }`}
+              >
+                In-Place Restore
+              </button>
+              <button
+                type="button"
+                onClick={() => setRestoreMode('staging')}
+                className={`rounded-lg px-3 py-2 text-xs font-medium transition-colors cursor-pointer ${
+                  restoreMode === 'staging'
+                    ? 'bg-zinc-800 text-zinc-100'
+                    : 'text-zinc-400 hover:text-zinc-200'
+                }`}
+              >
+                Staging Volume (Safe)
+              </button>
             </div>
 
-            <div className="rounded-xl border border-zinc-800 bg-zinc-950/60 p-3 text-xs space-y-1">
-              <div className="text-zinc-400 mb-1">Volumes to restore:</div>
-              {parseJSONList(restoreItem.volumesJson).map((m, idx) => (
-                <div key={idx} className="font-mono text-zinc-200 truncate">
-                  {m.name || m.source} → {m.destination}
+            {restoreMode === 'staging' ? (
+              <div className="space-y-3">
+                <div className="rounded-xl border border-emerald-500/30 bg-emerald-500/10 p-3 text-xs text-emerald-200">
+                  Creates/uses a separate staging Docker volume without overwriting or pausing any live container mounts.
                 </div>
-              ))}
-            </div>
+                <div>
+                  <Label htmlFor="restore-staging-vol">Staging Docker Volume Name</Label>
+                  <Input
+                    id="restore-staging-vol"
+                    value={restoreVolumeName}
+                    onChange={(e) => setRestoreVolumeName(e.target.value)}
+                    placeholder="my-app-restored"
+                    className="font-mono"
+                    required
+                  />
+                </div>
+              </div>
+            ) : (
+              <>
+                <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 p-3 text-xs text-amber-200 flex items-start gap-2.5">
+                  <AlertTriangle className="h-4 w-4 shrink-0 mt-0.5 text-amber-400" />
+                  <div>
+                    Restoring extracts <span className="font-mono">{restoreItem.fileName}</span> directly into
+                    the original Docker volume(s) / bind mounts, overwriting existing files with matching paths.
+                  </div>
+                </div>
 
-            <div className="flex items-center justify-between rounded-xl border border-zinc-800 bg-zinc-950/50 px-3.5 py-2.5">
-              <span className="text-xs text-zinc-200">
-                Pause running target container(s) during restore
-              </span>
-              <Switch checked={restorePause} onChange={setRestorePause} />
-            </div>
+                <div className="rounded-xl border border-zinc-800 bg-zinc-950/60 p-3 text-xs space-y-1">
+                  <div className="text-zinc-400 mb-1">Volumes to restore:</div>
+                  {parseJSONList(restoreItem.volumesJson).map((m, idx) => (
+                    <div key={idx} className="font-mono text-zinc-200 truncate">
+                      {m.name || m.source} → {m.destination}
+                    </div>
+                  ))}
+                </div>
+
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between rounded-xl border border-zinc-800 bg-zinc-950/50 px-3.5 py-2.5">
+                    <div className="pr-2">
+                      <div className="text-xs font-medium text-zinc-200">
+                        Take pre-restore safety snapshot
+                      </div>
+                      <p className="text-[11px] text-zinc-400">
+                        Saves current live data before overwriting.
+                      </p>
+                    </div>
+                    <Switch checked={restorePreSnap} onChange={setRestorePreSnap} />
+                  </div>
+
+                  <div className="flex items-center justify-between rounded-xl border border-zinc-800 bg-zinc-950/50 px-3.5 py-2.5">
+                    <span className="text-xs text-zinc-200">
+                      Pause running target container(s) during restore
+                    </span>
+                    <Switch checked={restorePause} onChange={setRestorePause} />
+                  </div>
+                </div>
+              </>
+            )}
 
             <div className="flex items-center justify-end gap-2 pt-2">
               <Button type="button" variant="ghost" onClick={() => setRestoreItem(null)}>
@@ -540,7 +648,11 @@ export function History({ backups, loading, onRefresh, notify }) {
               </Button>
               <Button type="submit" disabled={restoring}>
                 <RotateCcw className="h-4 w-4" />
-                {restoring ? 'Restoring...' : 'Confirm & Restore'}
+                {restoring
+                  ? 'Restoring...'
+                  : restoreMode === 'staging'
+                    ? 'Extract to Staging Volume'
+                    : 'Confirm & Restore'}
               </Button>
             </div>
           </form>

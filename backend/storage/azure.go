@@ -307,7 +307,7 @@ func (d *AzureDriver) List(ctx context.Context) ([]RemoteObject, error) {
 			}
 			blobPath := *item.Name
 			name := path.Base(blobPath)
-			if !strings.HasSuffix(name, ".tar.gz") && !strings.HasSuffix(name, ".tar.gz.enc") {
+			if !IsBackupArchiveName(name) {
 				continue
 			}
 			var size int64

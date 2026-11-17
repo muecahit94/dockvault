@@ -829,6 +829,90 @@ func TestSecurityFrameAncestorsHeader(t *testing.T) {
 	}
 }
 
+func TestDashboardAnalyticsZstdInspectAndScheduleOptions(t *testing.T) {
+	app, db, cfg, cleanup := setupTestApp(t)
+	defer cleanup()
+
+	var localProv models.StorageProvider
+	if err := db.Where("type = ?", "local").First(&localProv).Error; err != nil {
+		t.Fatalf("local provider: %v", err)
+	}
+
+	// Create schedule with zstd, excludePatterns, and dbHotDump.
+	resp, raw := doJSON(t, app, http.MethodPost, "/api/schedules", map[string]any{
+		"name":              "Postgres Nightly",
+		"targetType":        "stack",
+		"targetId":          "pg-stack",
+		"cronExpr":          "0 3 * * *",
+		"storageProviderId": localProv.ID,
+		"compression":       "zstd",
+		"excludePatterns":   "*.log, **/cache/**",
+		"dbHotDump":         true,
+	})
+	if resp.StatusCode != http.StatusCreated || !bytes.Contains(raw, []byte(`"compression":"zstd"`)) || !bytes.Contains(raw, []byte(`"dbHotDump":true`)) {
+		t.Fatalf("create schedule with zstd/dbHotDump failed (%d): %s", resp.StatusCode, raw)
+	}
+
+	// Write a zstd-compressed tar archive directly and test inspect + progress + dashboard analytics.
+	zstName := "pg-stack-20261117-120000.tar.zst"
+	zstPath := filepath.Join(cfg.BackupDir, zstName)
+	f, err := os.Create(zstPath)
+	if err != nil {
+		t.Fatalf("create zst: %v", err)
+	}
+	cw, err := dvcrypto.NewCompressedWriter(f, "zstd")
+	if err != nil {
+		t.Fatalf("zstd writer: %v", err)
+	}
+	tw := tar.NewWriter(cw)
+	payload := []byte("CREATE DATABASE dockvault;")
+	_ = tw.WriteHeader(&tar.Header{Name: "db_dumps/pg.sql", Size: int64(len(payload)), Mode: 0o644, Typeflag: tar.TypeReg})
+	_, _ = tw.Write(payload)
+	_ = tw.Close()
+	_ = cw.Close()
+	info, _ := f.Stat()
+	_ = f.Close()
+
+	entry := models.BackupLog{
+		Trigger:             "scheduled",
+		TargetType:          "stack",
+		TargetID:            "pg-stack",
+		TargetName:          "pg-stack",
+		StorageProviderID:   localProv.ID,
+		StorageProviderName: localProv.Name,
+		StorageType:         localProv.Type,
+		Compression:         "zstd",
+		Encrypted:           false,
+		Status:              "success",
+		FileName:            zstName,
+		StoragePath:         zstPath,
+		SizeBytes:           info.Size(),
+		StepsJSON:           `[{"name":"Database Hot Dumps","status":"done","durationMs":120}]`,
+		StartedAt:           time.Now().UTC(),
+	}
+	if err := db.Create(&entry).Error; err != nil {
+		t.Fatalf("create backup log: %v", err)
+	}
+
+	resp, raw = doJSON(t, app, http.MethodGet, "/api/backups/"+itoa(entry.ID)+"/inspect", nil)
+	if resp.StatusCode != http.StatusOK || !bytes.Contains(raw, []byte("db_dumps/pg.sql")) {
+		t.Fatalf("inspect zstd failed (%d): %s", resp.StatusCode, raw)
+	}
+
+	resp, raw = doJSON(t, app, http.MethodGet, "/api/backups/"+itoa(entry.ID)+"/progress", nil)
+	if resp.StatusCode != http.StatusOK || !bytes.Contains(raw, []byte("Database Hot Dumps")) {
+		t.Fatalf("progress endpoint failed (%d): %s", resp.StatusCode, raw)
+	}
+
+	resp, raw = doJSON(t, app, http.MethodGet, "/api/dashboard", nil)
+	if resp.StatusCode != http.StatusOK ||
+		!bytes.Contains(raw, []byte(`"storageAnalytics"`)) ||
+		!bytes.Contains(raw, []byte(`"securityOverview"`)) ||
+		!bytes.Contains(raw, []byte(`"zstd":1`)) {
+		t.Fatalf("dashboard analytics missing fields (%d): %s", resp.StatusCode, raw)
+	}
+}
+
 func itoa(id uint) string {
 	return string(bytes.TrimSpace([]byte(
 		func() string {

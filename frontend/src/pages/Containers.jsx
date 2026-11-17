@@ -1,8 +1,10 @@
 import { useMemo, useState } from 'react'
 import {
   Archive,
+  CalendarClock,
   CalendarPlus,
   Container,
+  Database,
   HardDrive,
   Layers,
   RefreshCw,
@@ -175,6 +177,18 @@ export function Containers({
                           {stack.runningCount}/{stack.totalCount} running
                         </Badge>
                         <Badge variant="info">{stack.backupableCount} backupable mounts</Badge>
+                        {stack.detectedDbs?.map((db) => (
+                          <Badge key={db} variant="success" className="text-[10px]">
+                            <Database className="h-2.5 w-2.5" />
+                            {db}
+                          </Badge>
+                        ))}
+                        {stack.gitopsSchedule && (
+                          <Badge variant="info" className="font-mono text-[10px]">
+                            <CalendarClock className="h-2.5 w-2.5" />
+                            GitOps: {stack.gitopsSchedule}
+                          </Badge>
+                        )}
                         {stack.lastBackupAt ? (
                           <Badge variant={stack.lastBackupStatus === 'failed' ? 'danger' : 'neutral'}>
                             Last backup {formatRelativeTime(stack.lastBackupAt)}
@@ -200,6 +214,11 @@ export function Containers({
                             targetType: 'stack',
                             targetId: stack.name,
                             targetName: stack.name,
+                            detectedDbs: stack.detectedDbs,
+                            gitopsSchedule: stack.gitopsSchedule,
+                            gitopsExcludePaths: stack.gitopsExcludePaths,
+                            gitopsCompression: stack.gitopsCompression,
+                            gitopsDbHotDump: stack.gitopsDbHotDump,
                           })
                         }
                       >
@@ -215,6 +234,10 @@ export function Containers({
                             targetId: stack.name,
                             targetName: stack.name,
                             mounts: stack.uniqueMounts,
+                            detectedDbs: stack.detectedDbs,
+                            gitopsExcludePaths: stack.gitopsExcludePaths,
+                            gitopsCompression: stack.gitopsCompression,
+                            gitopsDbHotDump: stack.gitopsDbHotDump,
                           })
                         }
                       >
@@ -318,6 +341,18 @@ export function Containers({
                               <span className="font-medium text-zinc-100">{c.name}</span>
                               {c.isSelf && <Badge variant="warning">Self</Badge>}
                               {c.excluded && <Badge variant="neutral">Excluded</Badge>}
+                              {c.detectedDb && (
+                                <Badge variant="success">
+                                  <Database className="h-3 w-3" />
+                                  {c.detectedDb}
+                                </Badge>
+                              )}
+                              {c.gitopsSchedule && (
+                                <Badge variant="info" className="font-mono text-[10px]">
+                                  <CalendarClock className="h-2.5 w-2.5" />
+                                  {c.gitopsSchedule}
+                                </Badge>
+                              )}
                               {(c.preHook || c.postHook) && (
                                 <Badge variant="info">
                                   <Terminal className="h-3 w-3" />
@@ -397,6 +432,11 @@ export function Containers({
                                     targetType: 'container',
                                     targetId: c.name,
                                     targetName: c.name,
+                                    detectedDb: c.detectedDb,
+                                    gitopsSchedule: c.gitopsSchedule,
+                                    gitopsExcludePaths: c.gitopsExcludePaths,
+                                    gitopsCompression: c.gitopsCompression,
+                                    gitopsDbHotDump: c.gitopsDbHotDump,
                                   })
                                 }
                               >
@@ -412,6 +452,10 @@ export function Containers({
                                     targetId: c.name,
                                     targetName: c.name,
                                     mounts: backupableMounts,
+                                    detectedDb: c.detectedDb,
+                                    gitopsExcludePaths: c.gitopsExcludePaths,
+                                    gitopsCompression: c.gitopsCompression,
+                                    gitopsDbHotDump: c.gitopsDbHotDump,
                                   })
                                 }
                               >

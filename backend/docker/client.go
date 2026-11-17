@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -52,6 +53,12 @@ type ContainerInfo struct {
 	Excluded           bool        `json:"excluded"`
 	PreHook            string      `json:"preHook,omitempty"`
 	PostHook           string      `json:"postHook,omitempty"`
+	DetectedDB         string      `json:"detectedDb,omitempty"`
+	GitOpsSchedule     string      `json:"gitopsSchedule,omitempty"`
+	GitOpsExcludePaths string      `json:"gitopsExcludePaths,omitempty"`
+	GitOpsRetention    int         `json:"gitopsRetention,omitempty"`
+	GitOpsCompression  string      `json:"gitopsCompression,omitempty"`
+	GitOpsDBHotDump    *bool       `json:"gitopsDbHotDump,omitempty"`
 	ComposeProject     string      `json:"composeProject"`
 	ComposeService     string      `json:"composeService"`
 	ComposeConfigFiles string      `json:"composeConfigFiles"`
@@ -64,16 +71,22 @@ type ContainerInfo struct {
 
 // ComposeStackInfo groups containers belonging to the same Docker Compose project.
 type ComposeStackInfo struct {
-	Name             string          `json:"name"`
-	WorkingDir       string          `json:"workingDir"`
-	ConfigFiles      string          `json:"configFiles"`
-	Containers       []ContainerInfo `json:"containers"`
-	RunningCount     int             `json:"runningCount"`
-	TotalCount       int             `json:"totalCount"`
-	UniqueMounts     []MountInfo     `json:"uniqueMounts"`
-	BackupableCount  int             `json:"backupableCount"`
-	LastBackupAt     *time.Time      `json:"lastBackupAt,omitempty"`
-	LastBackupStatus string          `json:"lastBackupStatus,omitempty"`
+	Name               string          `json:"name"`
+	WorkingDir         string          `json:"workingDir"`
+	ConfigFiles        string          `json:"configFiles"`
+	Containers         []ContainerInfo `json:"containers"`
+	RunningCount       int             `json:"runningCount"`
+	TotalCount         int             `json:"totalCount"`
+	UniqueMounts       []MountInfo     `json:"uniqueMounts"`
+	BackupableCount    int             `json:"backupableCount"`
+	DetectedDBs        []string        `json:"detectedDbs,omitempty"`
+	GitOpsSchedule     string          `json:"gitopsSchedule,omitempty"`
+	GitOpsExcludePaths string          `json:"gitopsExcludePaths,omitempty"`
+	GitOpsRetention    int             `json:"gitopsRetention,omitempty"`
+	GitOpsCompression  string          `json:"gitopsCompression,omitempty"`
+	GitOpsDBHotDump    *bool           `json:"gitopsDbHotDump,omitempty"`
+	LastBackupAt       *time.Time      `json:"lastBackupAt,omitempty"`
+	LastBackupStatus   string          `json:"lastBackupStatus,omitempty"`
 }
 
 // DaemonStatus summarizes connectivity to the local Docker socket.
@@ -96,6 +109,12 @@ type Service struct {
 	selfHostname         string
 	mu                   sync.Mutex
 	activeTargets        map[string]bool
+	progress             *ProgressHub
+}
+
+// Progress returns the live job progress hub.
+func (s *Service) Progress() *ProgressHub {
+	return s.progress
 }
 
 // NewService creates a Docker Service connected via environment/default socket.
@@ -119,6 +138,7 @@ func NewService(db *gorm.DB, backupDir, helperImage string, defaultEncryptionKey
 		defaultEncryptionKey: encKey,
 		selfHostname:         strings.TrimSpace(hostname),
 		activeTargets:        make(map[string]bool),
+		progress:             NewProgressHub(),
 	}, nil
 }
 
@@ -181,6 +201,18 @@ func (s *Service) ListContainers(ctx context.Context, includeAll bool) ([]Contai
 		excluded := strings.EqualFold(c.Labels["dockvault.exclude"], "true") ||
 			strings.EqualFold(c.Labels["dockvault.enable"], "false")
 
+		var gitopsRet int
+		if rawRet := strings.TrimSpace(c.Labels["dockvault.retention"]); rawRet != "" {
+			if parsed, err := strconv.Atoi(rawRet); err == nil && parsed >= 0 {
+				gitopsRet = parsed
+			}
+		}
+		var gitopsDBPtr *bool
+		if rawDB := strings.TrimSpace(c.Labels["dockvault.db-dump"]); rawDB != "" {
+			val := strings.EqualFold(rawDB, "true")
+			gitopsDBPtr = &val
+		}
+
 		result = append(result, ContainerInfo{
 			ID:                 c.ID,
 			ShortID:            shortID,
@@ -193,6 +225,12 @@ func (s *Service) ListContainers(ctx context.Context, includeAll bool) ([]Contai
 			Excluded:           excluded,
 			PreHook:            strings.TrimSpace(c.Labels["dockvault.pre-backup"]),
 			PostHook:           strings.TrimSpace(c.Labels["dockvault.post-backup"]),
+			DetectedDB:         DetectDBEngine(c.Image),
+			GitOpsSchedule:     strings.TrimSpace(c.Labels["dockvault.schedule"]),
+			GitOpsExcludePaths: strings.TrimSpace(c.Labels["dockvault.exclude-paths"]),
+			GitOpsRetention:    gitopsRet,
+			GitOpsCompression:  strings.TrimSpace(c.Labels["dockvault.compression"]),
+			GitOpsDBHotDump:    gitopsDBPtr,
 			ComposeProject:     c.Labels["com.docker.compose.project"],
 			ComposeService:     c.Labels["com.docker.compose.service"],
 			ComposeConfigFiles: c.Labels["com.docker.compose.project.config_files"],
@@ -217,6 +255,8 @@ func (s *Service) ListStacks(ctx context.Context, includeAll bool) ([]ComposeSta
 
 	byProject := make(map[string]*ComposeStackInfo)
 	seenMounts := make(map[string]map[string]bool)
+	seenDBs := make(map[string]map[string]bool)
+	seenExcludes := make(map[string][]string)
 
 	for _, c := range containers {
 		if c.ComposeProject == "" {
@@ -231,12 +271,33 @@ func (s *Service) ListStacks(ctx context.Context, includeAll bool) ([]ComposeSta
 			}
 			byProject[c.ComposeProject] = stack
 			seenMounts[c.ComposeProject] = make(map[string]bool)
+			seenDBs[c.ComposeProject] = make(map[string]bool)
 		}
 
 		stack.Containers = append(stack.Containers, c)
 		stack.TotalCount++
 		if c.State == "running" {
 			stack.RunningCount++
+		}
+		if c.DetectedDB != "" && !seenDBs[c.ComposeProject][c.DetectedDB] {
+			seenDBs[c.ComposeProject][c.DetectedDB] = true
+			stack.DetectedDBs = append(stack.DetectedDBs, c.DetectedDB)
+		}
+		if c.GitOpsSchedule != "" && stack.GitOpsSchedule == "" {
+			stack.GitOpsSchedule = c.GitOpsSchedule
+		}
+		if c.GitOpsExcludePaths != "" {
+			seenExcludes[c.ComposeProject] = append(seenExcludes[c.ComposeProject], c.GitOpsExcludePaths)
+		}
+		if c.GitOpsRetention > 0 && stack.GitOpsRetention == 0 {
+			stack.GitOpsRetention = c.GitOpsRetention
+		}
+		if c.GitOpsCompression != "" && stack.GitOpsCompression == "" {
+			stack.GitOpsCompression = c.GitOpsCompression
+		}
+		if c.GitOpsDBHotDump != nil && stack.GitOpsDBHotDump == nil {
+			val := *c.GitOpsDBHotDump
+			stack.GitOpsDBHotDump = &val
 		}
 
 		for _, m := range c.Mounts {
@@ -249,6 +310,13 @@ func (s *Service) ListStacks(ctx context.Context, includeAll bool) ([]ComposeSta
 				stack.UniqueMounts = append(stack.UniqueMounts, m)
 				stack.BackupableCount++
 			}
+		}
+	}
+
+	for proj, parts := range seenExcludes {
+		if stack, ok := byProject[proj]; ok {
+			merged := ParseExcludePatterns(strings.Join(parts, "\n"))
+			stack.GitOpsExcludePaths = strings.Join(merged, "\n")
 		}
 	}
 

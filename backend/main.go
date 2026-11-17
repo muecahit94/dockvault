@@ -35,6 +35,11 @@ func main() {
 	cleanupCancel()
 
 	schedMgr := scheduler.NewManager(db, dockerSvc)
+	syncCtx, syncCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	if _, err := schedMgr.SyncGitOpsSchedules(syncCtx); err != nil {
+		log.Printf("dockvault: warning: initial GitOps label sync skipped: %v", err)
+	}
+	syncCancel()
 	if err := schedMgr.Sync(); err != nil {
 		log.Printf("dockvault: warning: failed to sync schedules: %v", err)
 	}

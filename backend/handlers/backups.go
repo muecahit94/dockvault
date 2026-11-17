@@ -2,11 +2,13 @@ package handlers
 
 import (
 	"archive/tar"
-	"compress/gzip"
+	"bufio"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"path"
 	"strconv"
@@ -29,6 +31,9 @@ type runBackupPayload struct {
 	SelectedMounts     []string `json:"selectedMounts"`
 	PreCommand         string   `json:"preCommand"`
 	PostCommand        string   `json:"postCommand"`
+	ExcludePatterns    string   `json:"excludePatterns"`
+	Compression        string   `json:"compression"`
+	DBHotDump          *bool    `json:"dbHotDump"`
 }
 
 // ListBackups returns historical backup logs ordered newest-first.
@@ -72,6 +77,10 @@ func (s *Server) RunBackup(c *fiber.Ctx) error {
 	if body.PauseContainer != nil {
 		pause = *body.PauseContainer
 	}
+	dbHotDump := false
+	if body.DBHotDump != nil {
+		dbHotDump = *body.DBHotDump
+	}
 
 	logEntry, err := s.dockerSvc.StartBackupAsync(c.UserContext(), docker.BackupRequest{
 		TargetType:         strings.TrimSpace(body.TargetType),
@@ -82,6 +91,9 @@ func (s *Server) RunBackup(c *fiber.Ctx) error {
 		SelectedMounts:     body.SelectedMounts,
 		PreCommand:         strings.TrimSpace(body.PreCommand),
 		PostCommand:        strings.TrimSpace(body.PostCommand),
+		ExcludePatterns:    docker.ParseExcludePatterns(body.ExcludePatterns),
+		Compression:        dvcrypto.NormalizeCompression(body.Compression),
+		DBHotDump:          dbHotDump,
 		Trigger:            "manual",
 	})
 	if err != nil {
@@ -142,6 +154,8 @@ func (s *Server) DownloadBackup(c *fiber.Ctx) error {
 
 	if rawMode && isEncrypted {
 		c.Set("Content-Type", "application/octet-stream")
+	} else if dvcrypto.IsZstdFile(safeName) || dvcrypto.NormalizeCompression(logEntry.Compression) == "zstd" {
+		c.Set("Content-Type", "application/zstd")
 	} else {
 		c.Set("Content-Type", "application/gzip")
 	}
@@ -182,11 +196,11 @@ func (s *Server) InspectBackup(c *fiber.Ctx) error {
 	}
 	defer reader.Close()
 
-	gz, err := gzip.NewReader(reader)
+	decTar, err := dvcrypto.OpenCompressedReader(reader, logEntry.FileName)
 	if err != nil {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid gzip archive: " + err.Error()})
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid compressed archive: " + err.Error()})
 	}
-	defer gz.Close()
+	defer decTar.Close()
 
 	type archiveEntry struct {
 		Name    string    `json:"name"`
@@ -196,7 +210,7 @@ func (s *Server) InspectBackup(c *fiber.Ctx) error {
 	}
 
 	const maxEntries = 500
-	tr := tar.NewReader(gz)
+	tr := tar.NewReader(decTar)
 	entries := make([]archiveEntry, 0, 32)
 	totalEntries := 0
 	truncated := false
@@ -247,20 +261,20 @@ func (s *Server) ExtractSingleFile(c *fiber.Ctx) error {
 		return c.Status(httpStatusForArchiveErr(err)).JSON(fiber.Map{"error": err.Error()})
 	}
 
-	gz, err := gzip.NewReader(reader)
+	decTar, err := dvcrypto.OpenCompressedReader(reader, logEntry.FileName)
 	if err != nil {
 		_ = reader.Close()
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid gzip archive: " + err.Error()})
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid compressed archive: " + err.Error()})
 	}
 
-	tr := tar.NewReader(gz)
+	tr := tar.NewReader(decTar)
 	for {
 		hdr, err := tr.Next()
 		if errors.Is(err, io.EOF) {
 			break
 		}
 		if err != nil {
-			_ = gz.Close()
+			_ = decTar.Close()
 			_ = reader.Close()
 			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "read archive error: " + err.Error()})
 		}
@@ -275,11 +289,11 @@ func (s *Server) ExtractSingleFile(c *fiber.Ctx) error {
 			if hdr.Size > 0 {
 				c.Set("Content-Length", strconv.FormatInt(hdr.Size, 10))
 			}
-			return c.SendStream(multiCloseReader{r: tr, closers: []io.Closer{gz, reader}}, int(hdr.Size))
+			return c.SendStream(multiCloseReader{r: tr, closers: []io.Closer{decTar, reader}}, int(hdr.Size))
 		}
 	}
 
-	_ = gz.Close()
+	_ = decTar.Close()
 	_ = reader.Close()
 	return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "file not found inside archive"})
 }
@@ -344,7 +358,7 @@ func (s *Server) VerifyBackup(c *fiber.Ctx) error {
 	})
 }
 
-// RestoreBackup extracts a backup archive back into its target Docker volumes/bind mounts.
+// RestoreBackup extracts a backup archive back into original mounts or a staging volume.
 func (s *Server) RestoreBackup(c *fiber.Ctx) error {
 	id, err := strconv.ParseUint(c.Params("id"), 10, 64)
 	if err != nil {
@@ -357,7 +371,9 @@ func (s *Server) RestoreBackup(c *fiber.Ctx) error {
 	}
 
 	var body struct {
-		PauseContainer *bool `json:"pauseContainer"`
+		PauseContainer   *bool  `json:"pauseContainer"`
+		TargetVolumeName string `json:"targetVolumeName"`
+		PreRestoreBackup *bool  `json:"preRestoreBackup"`
 	}
 	if len(c.Body()) > 0 {
 		_ = c.BodyParser(&body)
@@ -366,8 +382,16 @@ func (s *Server) RestoreBackup(c *fiber.Ctx) error {
 	if body.PauseContainer != nil {
 		pause = *body.PauseContainer
 	}
+	preSnap := false
+	if body.PreRestoreBackup != nil {
+		preSnap = *body.PreRestoreBackup
+	}
 
-	res, err := s.dockerSvc.RestoreBackup(c.UserContext(), logEntry, pause)
+	res, err := s.dockerSvc.RestoreBackupWithOptions(c.UserContext(), logEntry, docker.RestoreOptions{
+		PauseContainer:   pause,
+		TargetVolumeName: strings.TrimSpace(body.TargetVolumeName),
+		PreRestoreBackup: preSnap,
+	})
 	if err != nil {
 		if errors.Is(err, docker.ErrBackupInProgress) || errors.Is(err, storage.ErrAzureArchiveTier) {
 			return c.Status(fiber.StatusConflict).JSON(fiber.Map{"error": err.Error()})
@@ -375,6 +399,91 @@ func (s *Server) RestoreBackup(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
 	}
 	return c.JSON(res)
+}
+
+// GetBackupProgress returns live progress (if active/recent) or persisted step timeline for a backup job.
+func (s *Server) GetBackupProgress(c *fiber.Ctx) error {
+	id, err := strconv.ParseUint(c.Params("id"), 10, 64)
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid backup id"})
+	}
+	if job, ok := s.dockerSvc.Progress().Get(uint(id)); ok {
+		return c.JSON(fiber.Map{"job": job})
+	}
+	var logEntry models.BackupLog
+	if err := s.db.First(&logEntry, id).Error; err != nil {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "backup log not found"})
+	}
+	var steps []docker.JobStep
+	if logEntry.StepsJSON != "" {
+		_ = json.Unmarshal([]byte(logEntry.StepsJSON), &steps)
+	}
+	return c.JSON(fiber.Map{
+		"job": docker.JobProgress{
+			BackupID:       logEntry.ID,
+			TargetName:     logEntry.TargetName,
+			TargetType:     logEntry.TargetType,
+			Status:         logEntry.Status,
+			Error:          logEntry.ErrorMessage,
+			BytesProcessed: logEntry.SizeBytes,
+			StartedAt:      logEntry.StartedAt,
+			Steps:          steps,
+		},
+	})
+}
+
+// StreamBackupEvents streams live backup progress snapshots via Server-Sent Events (SSE).
+func (s *Server) StreamBackupEvents(c *fiber.Ctx) error {
+	c.Set("Content-Type", "text/event-stream")
+	c.Set("Cache-Control", "no-cache")
+	c.Set("Connection", "keep-alive")
+	c.Set("X-Accel-Buffering", "no")
+
+	hub := s.dockerSvc.Progress()
+	ch, unsub := hub.Subscribe()
+	initial := hub.Snapshot()
+
+	c.Context().SetBodyStreamWriter(func(w *bufio.Writer) {
+		defer unsub()
+
+		writeJobs := func(jobs []docker.JobProgress) bool {
+			raw, err := json.Marshal(fiber.Map{"jobs": jobs})
+			if err != nil {
+				return true
+			}
+			if _, err := fmt.Fprintf(w, "event: progress\ndata: %s\n\n", raw); err != nil {
+				return false
+			}
+			return w.Flush() == nil
+		}
+
+		if !writeJobs(initial) {
+			return
+		}
+
+		ticker := time.NewTicker(15 * time.Second)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case jobs, ok := <-ch:
+				if !ok {
+					return
+				}
+				if !writeJobs(jobs) {
+					return
+				}
+			case <-ticker.C:
+				if _, err := w.WriteString(": keepalive\n\n"); err != nil {
+					return
+				}
+				if err := w.Flush(); err != nil {
+					return
+				}
+			}
+		}
+	})
+	return nil
 }
 
 func (s *Server) openBackupContext(rawID string) (models.BackupLog, models.StorageProvider, storage.Driver, int, string) {

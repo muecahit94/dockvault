@@ -6,6 +6,8 @@ import (
 	"time"
 
 	"github.com/gofiber/fiber/v2"
+	dvcrypto "github.com/muecahit94/dockvault/crypto"
+	"github.com/muecahit94/dockvault/docker"
 	"github.com/muecahit94/dockvault/models"
 	"github.com/muecahit94/dockvault/scheduler"
 )
@@ -26,6 +28,9 @@ type schedulePayload struct {
 	KeepMonthly        *int   `json:"keepMonthly"`
 	PreCommand         string `json:"preCommand"`
 	PostCommand        string `json:"postCommand"`
+	ExcludePatterns    string `json:"excludePatterns"`
+	Compression        string `json:"compression"`
+	DBHotDump          *bool  `json:"dbHotDump"`
 	Enabled            *bool  `json:"enabled"`
 }
 
@@ -150,6 +155,12 @@ func (s *Server) CreateSchedule(c *fiber.Ctx) error {
 		enabled = *body.Enabled
 	}
 
+	dbHotDump := false
+	if body.DBHotDump != nil {
+		dbHotDump = *body.DBHotDump
+	}
+	excludes := strings.Join(docker.ParseExcludePatterns(body.ExcludePatterns), "\n")
+
 	sched := models.BackupSchedule{
 		Name:               name,
 		TargetType:         targetType,
@@ -166,6 +177,9 @@ func (s *Server) CreateSchedule(c *fiber.Ctx) error {
 		KeepMonthly:        keepMonthly,
 		PreCommand:         strings.TrimSpace(body.PreCommand),
 		PostCommand:        strings.TrimSpace(body.PostCommand),
+		ExcludePatterns:    excludes,
+		Compression:        dvcrypto.NormalizeCompression(body.Compression),
+		DBHotDump:          dbHotDump,
 		Enabled:            enabled,
 	}
 
@@ -264,6 +278,13 @@ func (s *Server) UpdateSchedule(c *fiber.Ctx) error {
 	}
 	sched.PreCommand = strings.TrimSpace(body.PreCommand)
 	sched.PostCommand = strings.TrimSpace(body.PostCommand)
+	sched.ExcludePatterns = strings.Join(docker.ParseExcludePatterns(body.ExcludePatterns), "\n")
+	if strings.TrimSpace(body.Compression) != "" {
+		sched.Compression = dvcrypto.NormalizeCompression(body.Compression)
+	}
+	if body.DBHotDump != nil {
+		sched.DBHotDump = *body.DBHotDump
+	}
 	if body.Enabled != nil {
 		sched.Enabled = *body.Enabled
 	}
@@ -323,6 +344,15 @@ func (s *Server) TriggerSchedule(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": err.Error()})
 	}
 	return c.Status(fiber.StatusAccepted).JSON(fiber.Map{"triggered": true})
+}
+
+// SyncGitOpsSchedules imports/updates schedules declared via dockvault.schedule Docker labels.
+func (s *Server) SyncGitOpsSchedules(c *fiber.Ctx) error {
+	res, err := s.schedMgr.SyncGitOpsSchedules(c.UserContext())
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
+	}
+	return c.JSON(res)
 }
 
 // DeleteSchedule deletes a backup schedule and removes it from the cron runner.

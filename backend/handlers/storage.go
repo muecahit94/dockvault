@@ -34,7 +34,7 @@ type storagePayload struct {
 	EncryptionPassphrase     string `json:"encryptionPassphrase"`
 }
 
-var archiveTimestampRe = regexp.MustCompile(`^(.+)-(\d{8}-\d{6})\.tar\.gz(?:\.enc)?$`)
+var archiveTimestampRe = regexp.MustCompile(`^(.+)-(\d{8}-\d{6})\.tar\.(?:gz|zst)(?:\.enc)?$`)
 
 // ListStorageProviders returns all configured storage providers with masked secrets.
 func (s *Server) ListStorageProviders(c *fiber.Ctx) error {
@@ -325,7 +325,7 @@ func inferBackupMetadata(fileName string, fallbackTime time.Time) (string, time.
 		}
 		return matches[1], ts
 	}
-	cleaned := strings.TrimSuffix(strings.TrimSuffix(fileName, ".enc"), ".tar.gz")
+	cleaned := strings.TrimSuffix(strings.TrimSuffix(strings.TrimSuffix(fileName, ".enc"), ".tar.gz"), ".tar.zst")
 	if cleaned == "" {
 		cleaned = "imported-backup"
 	}

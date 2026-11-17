@@ -65,7 +65,9 @@ func NewApp(cfg *config.Config, db *gorm.DB, dockerSvc *docker.Service, schedMgr
 	protected.Delete("/volumes/:name", s.DeleteVolume)
 
 	protected.Get("/backups", s.ListBackups)
+	protected.Get("/backups/events", s.StreamBackupEvents)
 	protected.Post("/backups/run", s.RunBackup)
+	protected.Get("/backups/:id/progress", s.GetBackupProgress)
 	protected.Get("/backups/:id/download", s.DownloadBackup)
 	protected.Get("/backups/:id/inspect", s.InspectBackup)
 	protected.Get("/backups/:id/file", s.ExtractSingleFile)
@@ -77,6 +79,7 @@ func NewApp(cfg *config.Config, db *gorm.DB, dockerSvc *docker.Service, schedMgr
 
 	protected.Get("/schedules", s.ListSchedules)
 	protected.Post("/schedules", s.CreateSchedule)
+	protected.Post("/schedules/sync-labels", s.SyncGitOpsSchedules)
 	protected.Post("/schedules/preview", s.PreviewCron)
 	protected.Put("/schedules/:id", s.UpdateSchedule)
 	protected.Post("/schedules/:id/toggle", s.ToggleSchedule)
