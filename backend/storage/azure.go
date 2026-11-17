@@ -215,12 +215,6 @@ func (d *AzureDriver) Save(ctx context.Context, localTempPath, fileName string) 
 		blobName = path.Join(d.prefix, safeName)
 	}
 
-	f, err := os.Open(localTempPath)
-	if err != nil {
-		return "", fmt.Errorf("open temp archive for Azure upload: %w", err)
-	}
-	defer f.Close()
-
 	contentType := "application/gzip"
 	sourceTag := "true"
 	opts := &azblob.UploadFileOptions{
@@ -237,7 +231,16 @@ func (d *AzureDriver) Save(ctx context.Context, localTempPath, fileName string) 
 		opts.AccessTier = &tier
 	}
 
-	if _, err := d.client.UploadFile(ctx, d.container, blobName, f, opts); err != nil {
+	err = withRetry(ctx, "Azure upload "+blobName, isAzureRetryable, func() error {
+		f, openErr := os.Open(localTempPath)
+		if openErr != nil {
+			return fmt.Errorf("open temp archive for Azure upload: %w", openErr)
+		}
+		defer f.Close()
+		_, upErr := d.client.UploadFile(ctx, d.container, blobName, f, opts)
+		return upErr
+	})
+	if err != nil {
 		return "", fmt.Errorf("upload backup to azure://%s/%s: %w", d.container, blobName, err)
 	}
 
@@ -251,7 +254,15 @@ func (d *AzureDriver) Open(ctx context.Context, storagePath string) (io.ReadClos
 		return nil, 0, fmt.Errorf("empty Azure blob path")
 	}
 
-	resp, err := d.client.DownloadStream(ctx, d.container, blobName, nil)
+	var resp azblob.DownloadStreamResponse
+	err := withRetry(ctx, "Azure download "+blobName, isAzureRetryable, func() error {
+		r, dlErr := d.client.DownloadStream(ctx, d.container, blobName, nil)
+		if dlErr != nil {
+			return dlErr
+		}
+		resp = r
+		return nil
+	})
 	if err != nil {
 		if bloberror.HasCode(err, bloberror.BlobArchived) {
 			return nil, 0, fmt.Errorf("%w: %s", ErrAzureArchiveTier, blobName)
@@ -271,7 +282,11 @@ func (d *AzureDriver) Delete(ctx context.Context, storagePath string) error {
 	if blobName == "" {
 		return nil
 	}
-	if _, err := d.client.DeleteBlob(ctx, d.container, blobName, nil); err != nil {
+	err := withRetry(ctx, "Azure delete "+blobName, isAzureRetryable, func() error {
+		_, delErr := d.client.DeleteBlob(ctx, d.container, blobName, nil)
+		return delErr
+	})
+	if err != nil {
 		if bloberror.HasCode(err, bloberror.BlobNotFound) {
 			return nil
 		}
@@ -294,7 +309,15 @@ func (d *AzureDriver) List(ctx context.Context) ([]RemoteObject, error) {
 
 	var out []RemoteObject
 	for pager.More() {
-		page, err := pager.NextPage(ctx)
+		var page azblob.ListBlobsFlatResponse
+		err := withRetry(ctx, "Azure list", isAzureRetryable, func() error {
+			p, pageErr := pager.NextPage(ctx)
+			if pageErr != nil {
+				return pageErr
+			}
+			page = p
+			return nil
+		})
 		if err != nil {
 			return nil, fmt.Errorf("list Azure blobs: %w", err)
 		}
@@ -410,6 +433,15 @@ func (d *AzureDriver) ensureContainer(ctx context.Context) (bool, error) {
 		return false, fmt.Errorf("check Azure container %q (%s): %w", d.container, respErr.ErrorCode, err)
 	}
 	return false, fmt.Errorf("check Azure container %q: %w", d.container, err)
+}
+
+// isAzureRetryable reports transient Azure failures (throttling, 5xx, dropped connections).
+func isAzureRetryable(err error) bool {
+	var respErr *azcore.ResponseError
+	if errors.As(err, &respErr) {
+		return isRetryableHTTPStatus(respErr.StatusCode)
+	}
+	return isTransientNetworkError(err)
 }
 
 func resolveAzureServiceURL(accountName, endpoint string) string {

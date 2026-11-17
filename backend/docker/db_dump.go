@@ -97,11 +97,17 @@ func (s *Service) captureDBHotDump(ctx context.Context, c ContainerInfo) (*dbDum
 	tmpPath := tmpFile.Name()
 
 	var stderrBuf bytes.Buffer
-	written, copyErr := stdcopy.StdCopy(tmpFile, &stderrBuf, attachResp.Reader)
+	_, copyErr := stdcopy.StdCopy(tmpFile, &stderrBuf, attachResp.Reader)
+	// stdcopy.StdCopy returns stdout+stderr combined; stat tmpFile for exact stdout dump size.
+	info, statErr := tmpFile.Stat()
 	closeErr := tmpFile.Close()
 	if copyErr != nil {
 		_ = os.Remove(tmpPath)
 		return nil, fmt.Errorf("read db dump stdout on %s: %w", c.Name, copyErr)
+	}
+	if statErr != nil {
+		_ = os.Remove(tmpPath)
+		return nil, fmt.Errorf("stat db dump temp file: %w", statErr)
 	}
 	if closeErr != nil {
 		_ = os.Remove(tmpPath)
@@ -121,7 +127,8 @@ func (s *Service) captureDBHotDump(ctx context.Context, c ContainerInfo) (*dbDum
 		}
 		return nil, fmt.Errorf("%s hot dump on %s failed: %s", c.DetectedDB, c.Name, msg)
 	}
-	if written == 0 {
+	dumpSize := info.Size()
+	if dumpSize == 0 {
 		_ = os.Remove(tmpPath)
 		return nil, fmt.Errorf("%s hot dump on %s produced 0 bytes", c.DetectedDB, c.Name)
 	}
@@ -129,7 +136,7 @@ func (s *Service) captureDBHotDump(ctx context.Context, c ContainerInfo) (*dbDum
 	return &dbDumpSpec{
 		ArchivePath: fmt.Sprintf("db_dumps/%s-%s%s", sanitizeSlug(c.Name), c.DetectedDB, ext),
 		TempPath:    tmpPath,
-		Size:        written,
+		Size:        dumpSize,
 	}, nil
 }
 

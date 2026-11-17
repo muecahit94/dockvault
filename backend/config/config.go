@@ -21,6 +21,7 @@ type Config struct {
 	TrustedProxyHeader string
 	EncryptionKey      string
 	FrameAncestors     string
+	TrustedProxies     string
 }
 
 // Load reads configuration from environment variables with sensible defaults.
@@ -55,6 +56,7 @@ func Load() *Config {
 		TrustedProxyHeader: strings.TrimSpace(os.Getenv("DOCKVAULT_TRUSTED_PROXY_HEADER")),
 		EncryptionKey:      os.Getenv("DOCKVAULT_ENCRYPTION_KEY"),
 		FrameAncestors:     strings.TrimSpace(os.Getenv("DOCKVAULT_FRAME_ANCESTORS")),
+		TrustedProxies:     strings.TrimSpace(os.Getenv("DOCKVAULT_TRUSTED_PROXIES")),
 	}
 }
 

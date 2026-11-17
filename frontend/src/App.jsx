@@ -30,6 +30,7 @@ import { History } from './pages/History'
 import { Login } from './pages/Login'
 import { Schedules } from './pages/Schedules'
 import { Settings } from './pages/Settings'
+import { showDesktopNotification } from './utils/desktopNotifications'
 
 const NAV_ITEMS = [
   { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
@@ -96,6 +97,7 @@ export default function App() {
   const [liveJobs, setLiveJobs] = useState([])
   const [progressDrawerOpen, setProgressDrawerOpen] = useState(false)
   const prevRunningIdsRef = useRef(new Set())
+  const [unseenFailures, setUnseenFailures] = useState(0)
   const [toasts, setToasts] = useState([])
 
   const notify = useCallback((type, message) => {
@@ -219,9 +221,19 @@ export default function App() {
         const currentRunning = new Set(jobs.filter((j) => j.status === 'running').map((j) => j.backupId))
         let finishedAny = false
         for (const id of prevRunningIdsRef.current) {
-          if (!currentRunning.has(id)) {
-            finishedAny = true
-            break
+          if (currentRunning.has(id)) continue
+          finishedAny = true
+          const job = jobs.find((j) => j.backupId === id)
+          if (job && document.hidden) {
+            const failed = job.status === 'failed'
+            if (failed) setUnseenFailures((n) => n + 1)
+            showDesktopNotification(
+              failed ? `❌ Backup failed: ${job.targetName}` : `✅ Backup completed: ${job.targetName}`,
+              failed
+                ? job.error || 'See DockVault History for details.'
+                : `${job.targetType} backup finished${job.bytesProcessed > 0 ? ` (${formatBytes(job.bytesProcessed)})` : ''}`,
+              `dockvault-backup-${id}`,
+            )
           }
         }
         prevRunningIdsRef.current = currentRunning
@@ -253,6 +265,26 @@ export default function App() {
     }, intervalMs)
     return () => clearInterval(timer)
   }, [hasRunningBackup, preferences.autoRefreshSeconds, authStatus.enabled, authStatus.authenticated, loadAll])
+
+  // Reflect running jobs and unseen failures in the tab title so background tabs stay informative.
+  useEffect(() => {
+    const base = `DockVault${preferences.instanceName ? ` (${preferences.instanceName})` : ''}`
+    const prefix =
+      activeLiveJobs.length > 0
+        ? `⏳ ${activeLiveJobs.length} running · `
+        : unseenFailures > 0
+          ? `⚠️ ${unseenFailures} failed · `
+          : ''
+    document.title = prefix + base
+  }, [activeLiveJobs.length, unseenFailures, preferences.instanceName])
+
+  useEffect(() => {
+    const onVisible = () => {
+      if (!document.hidden) setUnseenFailures(0)
+    }
+    document.addEventListener('visibilitychange', onVisible)
+    return () => document.removeEventListener('visibilitychange', onVisible)
+  }, [])
 
   // Press 'r' outside input fields to refresh quickly.
   useEffect(() => {
@@ -517,6 +549,9 @@ export default function App() {
         {page === 'schedules' && (
           <Schedules
             schedules={schedules}
+            stacks={stacks}
+            containers={containers}
+            volumes={volumes}
             onCreate={() => setScheduleModal({ open: true, initialTarget: null, existing: null })}
             onEdit={(sched) => setScheduleModal({ open: true, initialTarget: null, existing: sched })}
             onRefresh={() => loadAll(true)}

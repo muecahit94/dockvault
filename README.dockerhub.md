@@ -82,7 +82,8 @@ docker run -d \
 - **Client-Side AES-256-GCM Encryption** — Encrypts archives locally (`scrypt` + chunked AES-256-GCM `.enc`) with an **Encryption & Key Health** overview, SHA-256 verification, in-browser archive tree inspection, and single-file extraction.
 - **Safer Restores** — Restore in place or into an isolated **Staging Volume**, with an optional **Pre-Restore Safety Snapshot** created automatically before modifying data.
 - **Observability & Analytics** — Real-time SSE **Live Backup Progress & Job Step Timeline**, **30/90-Day Backup Health Heatmap**, **24-Hour Cron Schedule Timeline**, and **Storage Analytics & Footprint** breakdown.
-- **Scheduling, Retention & Alerts** — Cron schedules (`TZ`-aware), Keep-N / GFS retention with snapshot pinning, declarative **GitOps Labels**, and independent **Telegram**, **Discord**, **Slack**, **ntfy**, or **Webhook** alerts.
+- **Scheduling, Retention & Alerts** — Cron schedules (`TZ`-aware), Keep-N / GFS retention with snapshot pinning, declarative **GitOps Labels**, reusable schedule policies, overdue-backup alerts, and independent **Telegram**, **Discord**, **Slack**, **ntfy**, or **Webhook** alerts.
+- **Notes, Compare & Selective Restore** — Annotate backups, diff two snapshots, bulk pin/verify/delete, and restore only selected files or folders.
 - **Auth & Reverse-Proxy SSO** — Built-in `bcrypt` login or trusted reverse-proxy header SSO (`Remote-User` / Authentik / Authelia) plus optional iframe embedding (`DOCKVAULT_FRAME_ANCESTORS`).
 
 ---
@@ -111,6 +112,7 @@ docker run -d \
 | `DOCKVAULT_TRUSTED_PROXY_HEADER` | Reverse-proxy SSO header (e.g., `Remote-User`, `X-authentik-username`) | _(unset)_ |
 | `DOCKVAULT_ENCRYPTION_KEY` | Fallback passphrase for AES-256-GCM archive encryption | _(unset)_ |
 | `DOCKVAULT_FRAME_ANCESTORS` | Origins allowed to iframe-embed the UI (replaces `X-Frame-Options: DENY`) | _(unset)_ |
+| `DOCKVAULT_TRUSTED_PROXIES` | Reverse-proxy IPs/CIDRs whose `X-Forwarded-For` identifies clients for login rate limiting | _(unset)_ |
 | `TZ` | Timezone for cron evaluation and timestamps | `UTC` |
 
 ---

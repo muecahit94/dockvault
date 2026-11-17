@@ -2,6 +2,7 @@
 .gitignore
 .github
 assets
+tests
 frontend/node_modules
 frontend/dist
 backend/static/dist/*

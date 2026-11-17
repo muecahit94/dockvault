@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"io/fs"
+	"net"
 	"net/http"
 	"strings"
 
@@ -22,6 +23,8 @@ type Server struct {
 	db        *gorm.DB
 	dockerSvc *docker.Service
 	schedMgr  *scheduler.Manager
+	// trustedProxies lists reverse proxies whose X-Forwarded-For is honored for client IPs.
+	trustedProxies []*net.IPNet
 }
 
 // NewApp wires up the Fiber application, API routes, auth middleware, security headers, and embedded SPA.
@@ -31,6 +34,8 @@ func NewApp(cfg *config.Config, db *gorm.DB, dockerSvc *docker.Service, schedMgr
 		db:        db,
 		dockerSvc: dockerSvc,
 		schedMgr:  schedMgr,
+
+		trustedProxies: parseTrustedProxies(cfg.TrustedProxies),
 	}
 	s.bootstrapAuth()
 
@@ -51,7 +56,7 @@ func NewApp(cfg *config.Config, db *gorm.DB, dockerSvc *docker.Service, schedMgr
 	api.Get("/health", s.GetHealth)
 	api.Get("/auth/status", s.GetAuthStatus)
 	api.Post("/auth/setup", s.SetupAuth)
-	api.Post("/auth/login", s.Login)
+	api.Post("/auth/login", s.loginRateLimiter(), s.Login)
 	api.Post("/auth/logout", s.Logout)
 
 	// Protected API endpoints when built-in auth is enabled.
@@ -67,6 +72,8 @@ func NewApp(cfg *config.Config, db *gorm.DB, dockerSvc *docker.Service, schedMgr
 	protected.Get("/backups", s.ListBackups)
 	protected.Get("/backups/events", s.StreamBackupEvents)
 	protected.Post("/backups/run", s.RunBackup)
+	protected.Post("/backups/bulk", s.BulkBackupAction)
+	protected.Get("/backups/compare", s.CompareBackups)
 	protected.Get("/backups/:id/progress", s.GetBackupProgress)
 	protected.Get("/backups/:id/download", s.DownloadBackup)
 	protected.Get("/backups/:id/inspect", s.InspectBackup)
@@ -74,6 +81,7 @@ func NewApp(cfg *config.Config, db *gorm.DB, dockerSvc *docker.Service, schedMgr
 	protected.Post("/backups/:id/verify", s.VerifyBackup)
 	protected.Post("/backups/:id/restore", s.RestoreBackup)
 	protected.Post("/backups/:id/pin", s.TogglePinBackup)
+	protected.Put("/backups/:id/note", s.UpdateBackupNote)
 	protected.Post("/backups/:id/sas", s.CreateBackupSASLink)
 	protected.Delete("/backups/:id", s.DeleteBackup)
 
@@ -84,6 +92,7 @@ func NewApp(cfg *config.Config, db *gorm.DB, dockerSvc *docker.Service, schedMgr
 	protected.Put("/schedules/:id", s.UpdateSchedule)
 	protected.Post("/schedules/:id/toggle", s.ToggleSchedule)
 	protected.Post("/schedules/:id/run", s.TriggerSchedule)
+	protected.Post("/schedules/:id/clone", s.CloneSchedule)
 	protected.Delete("/schedules/:id", s.DeleteSchedule)
 
 	protected.Get("/storage", s.ListStorageProviders)

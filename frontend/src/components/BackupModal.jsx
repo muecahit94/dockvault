@@ -27,6 +27,7 @@ export function BackupModal({
   const [compression, setCompression] = useState('gzip')
   const [excludePatterns, setExcludePatterns] = useState('')
   const [dbHotDump, setDbHotDump] = useState(false)
+  const [note, setNote] = useState('')
   const [submitting, setSubmitting] = useState(false)
 
   useEffect(() => {
@@ -43,6 +44,7 @@ export function BackupModal({
       setShowAdvanced(Boolean(target.gitopsExcludePaths))
       setPreCommand('')
       setPostCommand('')
+      setNote('')
       setCompression(target.gitopsCompression || 'gzip')
       setExcludePatterns(target.gitopsExcludePaths || '')
       setDbHotDump(
@@ -88,6 +90,7 @@ export function BackupModal({
         compression,
         excludePatterns: excludePatterns.trim(),
         dbHotDump,
+        note: note.trim(),
       }
       if (selectedMounts.length < mounts.length) {
         payload.selectedMounts = selectedMounts
@@ -250,6 +253,17 @@ export function BackupModal({
             <Switch checked={dbHotDump} onChange={setDbHotDump} />
           </div>
         )}
+
+        <div>
+          <Label htmlFor="backup-note">Note (optional)</Label>
+          <Input
+            id="backup-note"
+            value={note}
+            maxLength={500}
+            onChange={(e) => setNote(e.target.value)}
+            placeholder="e.g. before upgrading postgres to 17"
+          />
+        </div>
 
         <div>
           <button

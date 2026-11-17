@@ -23,6 +23,7 @@ import {
   formatRelativeTime,
   summarizeNotificationsList,
 } from '../api/client'
+import { SetupChecklist } from '../components/SetupChecklist'
 import { Badge, Button, Card, EmptyState } from '../components/ui'
 
 function StatusBadge({ status }) {
@@ -168,6 +169,13 @@ export function Dashboard({ dashboard, providers = [], notifications = [], onNav
           </div>
         </div>
       </Card>
+
+      <SetupChecklist
+        dashboard={dashboard}
+        providers={providers}
+        activeChannelCount={notifOverview.activeCount}
+        onNavigate={onNavigate}
+      />
 
       {/* KPI cards */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">

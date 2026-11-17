@@ -43,6 +43,7 @@ export function ScheduleModal({
   const [dbHotDump, setDbHotDump] = useState(false)
   const [pauseContainer, setPauseContainer] = useState(true)
   const [enabled, setEnabled] = useState(true)
+  const [alertAfterHours, setAlertAfterHours] = useState(0)
   const [preview, setPreview] = useState({ valid: true, nextRunAt: null, error: '' })
   const [saving, setSaving] = useState(false)
 
@@ -69,6 +70,7 @@ export function ScheduleModal({
       setDbHotDump(Boolean(existingSchedule.dbHotDump))
       setPauseContainer(existingSchedule.pauseContainer ?? true)
       setEnabled(existingSchedule.enabled ?? true)
+      setAlertAfterHours(existingSchedule.alertAfterHours ?? 0)
     } else if (initialTarget) {
       setName(`${initialTarget.targetName} Backup`)
       setTargetType(initialTarget.targetType)
@@ -90,6 +92,7 @@ export function ScheduleModal({
       )
       setPauseContainer(defaultPauseBackups)
       setEnabled(true)
+      setAlertAfterHours(0)
     } else {
       const firstStack = stacks[0]
       const firstContainer = containers.find((c) => c.backupableCount > 0) || containers[0]
@@ -118,6 +121,7 @@ export function ScheduleModal({
       setDbHotDump(false)
       setPauseContainer(defaultPauseBackups)
       setEnabled(true)
+      setAlertAfterHours(0)
     }
     // Intentionally initialize only when modal opens or target/schedule changes.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -182,6 +186,7 @@ export function ScheduleModal({
         dbHotDump,
         pauseContainer,
         enabled,
+        alertAfterHours: Math.max(0, Number(alertAfterHours) || 0),
       }
       if (existingSchedule) {
         await api.updateSchedule(existingSchedule.id, payload)
@@ -473,6 +478,25 @@ export function ScheduleModal({
               </div>
             </>
           )}
+          <div className="flex items-center justify-between gap-3 rounded-xl border border-zinc-800 bg-zinc-950/50 px-3.5 py-2.5">
+            <div className="pr-2">
+              <label htmlFor="sched-alert-after" className="text-xs text-zinc-200">
+                Alert if no successful backup within (hours)
+              </label>
+              <p className="text-[11px] text-zinc-400">
+                Sends an "overdue" alert to failure channels when backups silently stop. 0 = off; use 26 for a daily job.
+              </p>
+            </div>
+            <Input
+              id="sched-alert-after"
+              type="number"
+              min={0}
+              max={8760}
+              value={alertAfterHours}
+              onChange={(e) => setAlertAfterHours(e.target.value)}
+              className="w-24 font-mono text-xs"
+            />
+          </div>
           <div className="flex items-center justify-between rounded-xl border border-zinc-800 bg-zinc-950/50 px-3.5 py-2.5">
             <span className="text-xs text-zinc-200">Schedule enabled</span>
             <Switch checked={enabled} onChange={setEnabled} />

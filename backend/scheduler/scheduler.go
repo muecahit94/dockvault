@@ -24,6 +24,8 @@ type Manager struct {
 	cron      *cron.Cron
 	mu        sync.Mutex
 	entryIDs  map[uint]cron.EntryID
+	stopCh    chan struct{}
+	stopOnce  sync.Once
 }
 
 // NewManager creates and starts a new cron Manager.
@@ -34,8 +36,10 @@ func NewManager(db *gorm.DB, dockerSvc *docker.Service) *Manager {
 		dockerSvc: dockerSvc,
 		cron:      c,
 		entryIDs:  make(map[uint]cron.EntryID),
+		stopCh:    make(chan struct{}),
 	}
 	c.Start()
+	go m.runStaleMonitor()
 	return m
 }
 
@@ -106,6 +110,7 @@ func (m *Manager) NextRun(scheduleID uint) *time.Time {
 
 // Stop halts the cron scheduler and waits for running jobs to complete.
 func (m *Manager) Stop() {
+	m.stopOnce.Do(func() { close(m.stopCh) })
 	ctx := m.cron.Stop()
 	<-ctx.Done()
 }
