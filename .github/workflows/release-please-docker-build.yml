@@ -138,3 +138,29 @@ jobs:
 
       - name: Inspect image
         run: docker buildx imagetools inspect ${{ env.REGISTRY_IMAGE }}:${{ steps.meta.outputs.version }}
+
+      - name: Log in to Docker Hub
+        if: ${{ secrets.DOCKERHUB_USERNAME != '' && secrets.DOCKERHUB_TOKEN != '' }}
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Extract Docker Hub metadata
+        id: dh_meta
+        if: ${{ secrets.DOCKERHUB_USERNAME != '' && secrets.DOCKERHUB_TOKEN != '' }}
+        uses: docker/metadata-action@v5
+        with:
+          images: docker.io/${{ secrets.DOCKERHUB_USERNAME }}/dockvault
+          tags: |
+            type=semver,pattern={{version}},value=${{ needs.release-please.outputs.tag_name }}
+            type=semver,pattern={{major}}.{{minor}},value=${{ needs.release-please.outputs.tag_name }}
+            type=raw,value=latest
+
+      - name: Copy multi-arch image to Docker Hub
+        if: ${{ secrets.DOCKERHUB_USERNAME != '' && secrets.DOCKERHUB_TOKEN != '' }}
+        env:
+          DH_META_JSON: ${{ steps.dh_meta.outputs.json }}
+        run: |
+          docker buildx imagetools create $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DH_META_JSON") \
+            ${{ env.REGISTRY_IMAGE }}:${{ steps.meta.outputs.version }}

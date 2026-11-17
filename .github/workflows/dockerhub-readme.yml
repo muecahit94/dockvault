@@ -1,0 +1,32 @@
+name: Sync README to Docker Hub
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - README.md
+      - assets/logo.png
+  workflow_dispatch:
+
+jobs:
+  sync-readme:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout README
+        if: ${{ secrets.DOCKERHUB_USERNAME != '' && secrets.DOCKERHUB_TOKEN != '' }}
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: |
+            README.md
+
+      - name: Update Docker Hub Description
+        if: ${{ secrets.DOCKERHUB_USERNAME != '' && secrets.DOCKERHUB_TOKEN != '' }}
+        uses: peter-evans/dockerhub-description@v5
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          repository: ${{ secrets.DOCKERHUB_USERNAME }}/dockvault
+          readme-filepath: ./README.md
+          short-description: ${{ github.event.repository.description }}
+          enable-url-completion: true
