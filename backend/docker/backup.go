@@ -51,6 +51,7 @@ type BackupRequest struct {
 	KeepDaily          int
 	KeepWeekly         int
 	KeepMonthly        int
+	Note               string // optional free-text context, e.g. "before postgres 17 upgrade"
 }
 
 // RestoreOptions configures staging-volume and pre-restore safety snapshot behavior.
@@ -58,6 +59,9 @@ type RestoreOptions struct {
 	PauseContainer   bool
 	TargetVolumeName string
 	PreRestoreBackup bool
+	// Paths limits extraction to these archive entries (files or directory subtrees).
+	// Empty restores the full archive.
+	Paths []string
 }
 
 // RestoreResult summarizes a completed volume restore operation.
@@ -65,6 +69,7 @@ type RestoreResult struct {
 	Restored           bool     `json:"restored"`
 	TargetName         string   `json:"targetName"`
 	RestoredMounts     int      `json:"restoredMounts"`
+	RestoredPaths      int      `json:"restoredPaths,omitempty"`
 	RestoredVolume     string   `json:"restoredVolume,omitempty"`
 	PreRestoreBackupID *uint    `json:"preRestoreBackupId,omitempty"`
 	PausedContainers   []string `json:"pausedContainers"`
@@ -221,6 +226,7 @@ func (s *Service) prepareBackup(ctx context.Context, req BackupRequest) (*prepar
 		Status:              "running",
 		VolumeCount:         len(mounts),
 		VolumesJSON:         string(volumesJSON),
+		Note:                truncateNote(req.Note),
 		StartedAt:           startedAt,
 	}
 	if err := s.db.Create(&logEntry).Error; err != nil {
@@ -439,6 +445,19 @@ func (s *Service) executePrepared(ctx context.Context, prep *preparedBackup) (*m
 		s.replicateToSecondary(ctx, prep, &logEntry, plainPath, plainSize, plainChecksum, baseSlug, ext)
 	}
 
+	completed := time.Now().UTC()
+	logEntry.Status = "success"
+	logEntry.FileName = primaryFileName
+	logEntry.StoragePath = primaryPath
+	logEntry.SizeBytes = primarySize
+	logEntry.ChecksumSHA256 = primaryChecksum
+	logEntry.CompletedAt = &completed
+	logEntry.DurationMs = completed.Sub(startedAt).Milliseconds()
+	// Persist success status before pruning so retention includes this newly completed backup in the Keep-N / GFS count.
+	if err := s.db.Save(&logEntry).Error; err != nil {
+		return &logEntry, fmt.Errorf("update backup log: %w", err)
+	}
+
 	// 5. Retention pruning (pin-protected, count or GFS).
 	if prep.req.ScheduleID != nil {
 		tracker.BeginStep("retention", "Retention Pruning", prep.req.RetentionPolicy)
@@ -451,18 +470,8 @@ func (s *Service) executePrepared(ctx context.Context, prep *preparedBackup) (*m
 		})
 	}
 
-	completed := time.Now().UTC()
-	logEntry.Status = "success"
-	logEntry.FileName = primaryFileName
-	logEntry.StoragePath = primaryPath
-	logEntry.SizeBytes = primarySize
-	logEntry.ChecksumSHA256 = primaryChecksum
-	logEntry.CompletedAt = &completed
-	logEntry.DurationMs = completed.Sub(startedAt).Milliseconds()
 	logEntry.StepsJSON = tracker.Finish("success", "")
-	if err := s.db.Save(&logEntry).Error; err != nil {
-		return &logEntry, fmt.Errorf("update backup log: %w", err)
-	}
+	_ = s.db.Model(&logEntry).Update("steps_json", logEntry.StepsJSON).Error
 
 	go notify.DispatchBackupAlert(context.Background(), s.db, &logEntry)
 	return &logEntry, nil
@@ -614,6 +623,7 @@ func (s *Service) RestoreBackupWithOptions(ctx context.Context, logEntry models.
 			PauseContainer:    opts.PauseContainer,
 			Compression:       logEntry.Compression,
 			Trigger:           "pre-restore",
+			Note:              fmt.Sprintf("Safety snapshot before restoring backup #%d", logEntry.ID),
 		})
 		if snapErr != nil {
 			return nil, fmt.Errorf("pre-restore safety snapshot failed (restore aborted): %w", snapErr)
@@ -658,6 +668,14 @@ func (s *Service) RestoreBackupWithOptions(ctx context.Context, logEntry models.
 	}
 	defer tarStream.Close()
 
+	var selectedPaths []string
+	if len(opts.Paths) > 0 {
+		selectedPaths = NormalizeArchivePaths(opts.Paths)
+		if len(selectedPaths) == 0 {
+			return nil, fmt.Errorf("no valid paths selected for restore")
+		}
+	}
+
 	if err := s.ensureHelperImage(ctx); err != nil {
 		return nil, fmt.Errorf("prepare helper image %s: %w", s.helperImage, err)
 	}
@@ -695,7 +713,15 @@ func (s *Service) RestoreBackupWithOptions(ctx context.Context, logEntry models.
 		}
 	}
 
-	if err := s.runRestoreHelper(ctx, mounts, stagingVol, tarStream); err != nil {
+	var restoreInput io.Reader = tarStream
+	if len(selectedPaths) > 0 {
+		filtered, stopFilter := FilterTarStream(tarStream, selectedPaths)
+		// Runs before the tarStream/archiveStream closes deferred above.
+		defer stopFilter()
+		restoreInput = filtered
+	}
+
+	if err := s.runRestoreHelper(ctx, mounts, stagingVol, restoreInput); err != nil {
 		return nil, err
 	}
 	unpauseAll()
@@ -704,6 +730,7 @@ func (s *Service) RestoreBackupWithOptions(ctx context.Context, logEntry models.
 		Restored:           true,
 		TargetName:         logEntry.TargetName,
 		RestoredMounts:     len(mounts),
+		RestoredPaths:      len(selectedPaths),
 		RestoredVolume:     stagingVol,
 		PreRestoreBackupID: preRestoreID,
 		PausedContainers:   pausedNames,

@@ -89,6 +89,18 @@ export const api = {
     request(`/backups/${id}?deleteFile=${deleteFile}`, {
       method: 'DELETE',
     }),
+  updateBackupNote: (id, note) =>
+    request(`/backups/${id}/note`, {
+      method: 'PUT',
+      body: JSON.stringify({ note }),
+    }),
+  bulkBackupAction: (action, ids, options = {}) =>
+    request('/backups/bulk', {
+      method: 'POST',
+      body: JSON.stringify({ action, ids, ...options }),
+    }),
+  compareBackups: (baseId, targetId) =>
+    request(`/backups/compare?base=${baseId}&target=${targetId}`),
   createBackupSasLink: (id) =>
     request(`/backups/${id}/sas`, {
       method: 'POST',
@@ -106,6 +118,7 @@ export const api = {
             pauseContainer: options?.pauseContainer ?? true,
             targetVolumeName: options?.targetVolumeName || '',
             preRestoreBackup: Boolean(options?.preRestoreBackup),
+            paths: Array.isArray(options?.paths) ? options.paths : [],
           }
     return request(`/backups/${id}/restore`, {
       method: 'POST',
@@ -141,6 +154,11 @@ export const api = {
   triggerSchedule: (id) =>
     request(`/schedules/${id}/run`, {
       method: 'POST',
+    }),
+  cloneSchedule: (id, targets = []) =>
+    request(`/schedules/${id}/clone`, {
+      method: 'POST',
+      body: JSON.stringify({ targets }),
     }),
   deleteSchedule: (id) =>
     request(`/schedules/${id}`, {

@@ -61,15 +61,20 @@ DockVault runs as a single lightweight container with read/control access to `/v
 - **Client-Side Encryption (AES-256-GCM)** — Enable encryption per storage destination to encrypt archives locally into `.tar.gz.enc` (scrypt key derivation + chunked AES-256-GCM) before uploading; transparently decrypted on **Inspect**, **Download**, **Verify**, and **Restore** (raw `.enc` downloads remain available via `?raw=true`).
 - **Archive Tree Inspector & Single-File Extract** — Browse files inside `.tar.gz` and `.tar.gz.enc` backups directly in the browser and extract a single config or database file without downloading the whole archive.
 - **SHA-256 Integrity Verification** — Every backup records a SHA-256 digest and can be verified against stored data on demand.
-- **One-Click Volume Restore** — Restore entire volume trees back into their target mounts with optional container pausing during extraction.
+- **One-Click & Selective Restore** — Restore entire volume trees back into their target mounts (or a staging volume) with optional container pausing, or tick individual files/folders in the archive inspector to restore only those paths.
+- **Backup Notes & Snapshot Compare** — Annotate backups (e.g. "before postgres 17 upgrade") when running them or later in History, and diff any two snapshots to see added, removed, and changed files.
+- **Bulk History Actions** — Multi-select backups to pin, unpin, verify, or delete them in one go.
 
 ### Scheduling, Retention & Multi-Channel Alerts
 - **Cron Scheduler with Live Preview** — Built-in cron presets, timezone awareness (`TZ`), one-click **Run Now**, and next-run previews before saving.
 - **Keep-N & GFS Retention + Pinning** — Automatically prune old snapshots by count (`Keep Latest N`) or **Grandfather-Father-Son (Daily / Weekly / Monthly)** rules, and **Pin** critical backups so they are never pruned.
-- **Multiple Notification Channels** — Configure and independently enable/disable multiple **Telegram Bot** (with optional topic/thread IDs), **Discord**, **Slack**, **ntfy**, or **Generic JSON Webhook** channels, with per-channel failure/success triggers and one-click test alerts.
+- **Reusable Schedules** — Duplicate a schedule or apply its full policy (cron, storage, retention, hooks, alerts) to many stacks, containers, or volumes at once.
+- **Overdue Backup Alerts** — Set a per-schedule alert window (e.g. 26h for a daily job) to get notified when backups silently stop succeeding, not just when they fail.
+- **Resilient Cloud Uploads** — S3 and Azure transfers automatically retry transient failures (throttling, 5xx, dropped connections) with backoff.
+- **Multiple Notification Channels** — Configure and independently enable/disable multiple **Telegram Bot** (with optional topic/thread IDs), **Discord**, **Slack**, **ntfy**, or **Generic JSON Webhook** channels, with per-channel failure/success triggers and one-click test alerts, plus optional browser desktop notifications and a live tab-title status for backups finishing in the background.
 
 ### Security & Customizable Workspace
-- **Built-in Auth & Reverse Proxy SSO** — Protect the UI with local username/password authentication (`bcrypt` + signed `HttpOnly` cookies) or delegate auth to a reverse proxy header (e.g., `Remote-User` from Authelia, Authentik, or Traefik ForwardAuth).
+- **Built-in Auth & Reverse Proxy SSO** — Protect the UI with local username/password authentication (`bcrypt` + signed `HttpOnly` cookies) or delegate auth to a reverse proxy header (e.g., `Remote-User` from Authelia, Authentik, or Traefik ForwardAuth). Failed logins are rate-limited (10 per 15 minutes per client IP and username; set `DOCKVAULT_TRUSTED_PROXIES` behind a reverse proxy).
 - **Configurable UI & Preferences** — Switch between Dark / Light / System themes, 5 accent colors, Comfortable / Compact table density, 12h / 24h clock format, instance badge name (e.g., `prod-eu`), default landing tab, and background auto-refresh intervals.
 
 ---
@@ -119,10 +124,11 @@ docker compose up -d
    - Click **Backup** on any stack, container, or volume to choose mounts, primary + 3-2-1 secondary storage, pause behavior, and pre/post hooks.
 3. **Automate with Schedules (`Schedules`)**
    - Create cron jobs with Keep-N or GFS retention rules and inspect the **Next Run** preview right in the modal.
+   - Set **Alert if no successful backup within (hours)** to be warned about overdue schedules, and use **Duplicate** / **Apply to other targets** to reuse a policy.
 4. **Set Up Alerts (`Settings → Notifications`)**
    - Click **Add Channel** to configure one or more channels (Telegram Bot, Discord, Slack, ntfy, or webhook), toggle each channel active/paused independently, and send a **Test** alert.
 5. **Inspect, Verify & Restore (`History`)**
-   - **Pin** important snapshots to protect them from retention pruning.
+   - **Pin** important snapshots to protect them from retention pruning, add **notes**, or select several rows for bulk pin/verify/delete — select exactly two to **Compare** them.
    - Click the eye icon (**Inspect**) to browse archive entries, extract individual files, or run **Verify SHA-256**, and click **Download** to save the `.tar.gz` archive (decrypted on the fly if encrypted).
    - Click **Restore** to write an archive back to its target volumes.
 
@@ -177,6 +183,7 @@ services:
 | `DOCKVAULT_TRUSTED_PROXY_HEADER` | Optional reverse-proxy SSO header (e.g., `Remote-User`, `X-authentik-username`) | _(unset)_ |
 | `DOCKVAULT_ENCRYPTION_KEY` | Optional fallback passphrase for AES-256-GCM archive encryption | _(unset)_ |
 | `DOCKVAULT_FRAME_ANCESTORS` | Optional origins allowed to iframe-embed the UI (replaces `X-Frame-Options: DENY`) | _(unset)_ |
+| `DOCKVAULT_TRUSTED_PROXIES` | Optional reverse-proxy IPs/CIDRs (e.g. `172.16.0.0/12`) whose `X-Forwarded-For` is used to identify clients for login rate limiting | _(unset)_ |
 | `TZ` | Timezone used for cron schedule evaluation and logs | `UTC` |
 
 ---

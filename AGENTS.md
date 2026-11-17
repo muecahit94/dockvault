@@ -18,7 +18,7 @@ DockVault is a self-hosted, single-container web application that connects to `/
 dockvault/
 ├── backend/
 │   ├── main.go                    # Entrypoint: config, DB, Docker service, cron sync, graceful shutdown
-│   ├── config/config.go           # Env config (DOCKVAULT_PORT, DATA_DIR, BACKUP_DIR, HELPER_IMAGE)
+│   ├── config/config.go           # Env config (DOCKVAULT_PORT, DATA_DIR, BACKUP_DIR, HELPER_IMAGE, TRUSTED_PROXIES, ...)
 │   ├── auth/auth.go               # Password hashing (bcrypt) & HMAC-SHA256 session cookie signing/verification
 │   ├── crypto/archive.go          # Streaming chunked AES-256-GCM archive encryption & decryption (DVENC1)
 │   ├── models/
@@ -27,21 +27,25 @@ dockvault/
 │   ├── docker/
 │   │   ├── client.go              # Docker discovery, Compose stacks, volumes/orphans, exec hook labels, mount filtering
 │   │   ├── retention.go           # Count-based & GFS (daily/weekly/monthly) pruning while protecting pinned backups
+│   │   ├── archive_filter.go      # Tar stream filtering for selective restore (selected paths + ancestor dirs)
 │   │   └── backup.go              # Safe backup/restore engine (hooks, pause, alpine tar stream, encryption, 3-2-1, prune)
 │   ├── storage/
 │   │   ├── storage.go             # Driver interface, factory, optional DetailedTester/SASURLGenerator, SafeFileName
 │   │   ├── local.go               # Local disk driver with base-dir containment checks
+│   │   ├── retry.go               # Operation-level retry with backoff for transient S3/Azure failures
 │   │   ├── s3.go                  # MinIO/S3-compatible driver (normalizeEndpoint, Put/Get/Remove/Test)
 │   │   └── azure.go               # Azure Blob Storage driver (SharedKey/ConnStr/SAS, AccessTier, AutoCreate, SAS links)
-│   ├── notify/notify.go           # Notifications (Telegram Bot, Discord, Slack, ntfy, generic JSON)
+│   ├── notify/notify.go           # Notifications (Telegram Bot, Discord, Slack, ntfy, generic JSON); backup + stale-schedule alerts
 │   ├── scheduler/scheduler.go     # robfig/cron/v3 manager synced with enabled DB schedules
-│   ├── handlers/                  # Fiber HTTP API controllers + embedded SPA fallback + security headers
+│   ├── scheduler/stale.go         # Overdue-schedule monitor (AlertAfterHours; alerts once per overdue period)
+│   ├── handlers/                  # Fiber HTTP API controllers + embedded SPA fallback + security headers + login rate limiter
 │   └── static/                    # Embedded React dist assets
 ├── frontend/
 │   └── src/
 │       ├── App.jsx                # Navigation shell, polling while backups run, modal/toast orchestration
 │       ├── api/client.js          # Typed fetch wrapper + byte/duration/date formatters
-│       ├── components/            # ui.jsx, BackupModal.jsx, ScheduleModal.jsx
+│       ├── components/            # ui.jsx, BackupModal.jsx, ScheduleModal.jsx, ApplyScheduleModal.jsx, SetupChecklist.jsx
+│       ├── utils/                 # desktopNotifications.js (per-browser opt-in, localStorage)
 │       └── pages/                 # Dashboard.jsx, Containers.jsx, Schedules.jsx, History.jsx, Settings.jsx
 ├── .github/workflows/
 │   ├── ci.yml                     # Frontend lint/build + backend go vet/test/build
@@ -102,17 +106,18 @@ cd backend && go run .
 cd frontend && npm run dev
 ```
 
-### Docker Build & Validation (from repo root)
+### Docker Build & E2E Validation (from repo root)
 ```bash
 docker compose config -q
 docker build --build-arg VERSION=0.1.0 -t dockvault:local .
+./tests/e2e/run_e2e.sh
 ```
 
 ---
 
 ## 4. CI/CD & Release Workflow
 
-- **CI (`.github/workflows/ci.yml`)**: Runs on every pull request and non-`main` push (`frontend` lint + build; `backend` vet + `go test -race ./...` + `CGO_ENABLED=0 go build`).
+- **CI (`.github/workflows/ci.yml`)**: Runs on every pull request and non-`main` push (`frontend` lint + build; `backend` vet + `go test -race ./...` + `CGO_ENABLED=0 go build`; `e2e` live Docker suite via `./tests/e2e/run_e2e.sh`).
 - **Release & Multi-Arch Images (`.github/workflows/release-please-docker-build.yml`)**:
   - Uses `googleapis/release-please-action@v4` with `release-please-config.json` (`release-type: simple`) and `.release-please-manifest.json` on pushes to `main`.
   - When a release is created, builds `linux/amd64` (`ubuntu-24.04`) and `linux/arm64` (`ubuntu-24.04-arm`) natively by digest with `VERSION` injected via `ldflags`, then merges them via `docker buildx imagetools create` to `ghcr.io/${{ github.repository }}` (`{{version}}`, `{{major}}.{{minor}}`, `latest`).

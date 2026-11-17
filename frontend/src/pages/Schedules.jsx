@@ -1,6 +1,7 @@
 import { useMemo, useState } from 'react'
-import { CalendarClock, Clock, Edit2, Play, Plus, RefreshCw, Trash2 } from 'lucide-react'
+import { AlertTriangle, CalendarClock, Clock, Copy, CopyPlus, Edit2, Play, Plus, RefreshCw, Trash2 } from 'lucide-react'
 import { api, formatDateTime, formatRelativeTime } from '../api/client'
+import { ApplyScheduleModal } from '../components/ApplyScheduleModal'
 import { Badge, Button, Card, EmptyState, Switch } from '../components/ui'
 
 function extractCronHours(expr) {
@@ -40,8 +41,19 @@ function extractCronHours(expr) {
   return Array.from(hours).sort((a, b) => a - b)
 }
 
-export function Schedules({ schedules, onCreate, onEdit, onRefresh, notify }) {
+export function Schedules({
+  schedules,
+  stacks = [],
+  containers = [],
+  volumes = [],
+  onCreate,
+  onEdit,
+  onRefresh,
+  notify,
+}) {
   const [syncingLabels, setSyncingLabels] = useState(false)
+  const [applySource, setApplySource] = useState(null)
+  const staleSchedules = schedules.filter((s) => s.stale)
 
   const timelineHours = useMemo(() => {
     const buckets = Array.from({ length: 24 }, (_, hour) => ({ hour, jobs: [] }))
@@ -92,6 +104,18 @@ export function Schedules({ schedules, onCreate, onEdit, onRefresh, notify }) {
     }
   }
 
+  async function handleDuplicate(sched) {
+    try {
+      const res = await api.cloneSchedule(sched.id)
+      const copy = res.schedules?.[0]
+      notify('success', `Created paused copy "${copy?.name || sched.name}" — edit it, then enable`)
+      onRefresh()
+      if (copy) onEdit(copy)
+    } catch (err) {
+      notify('error', err.message)
+    }
+  }
+
   async function handleDelete(sched) {
     if (!window.confirm(`Delete schedule "${sched.name}"?`)) return
     try {
@@ -123,6 +147,16 @@ export function Schedules({ schedules, onCreate, onEdit, onRefresh, notify }) {
           </Button>
         </div>
       </div>
+
+      {staleSchedules.length > 0 && (
+        <div className="flex items-start gap-2.5 rounded-xl border border-amber-500/30 bg-amber-500/10 p-3 text-xs text-amber-200">
+          <AlertTriangle className="h-4 w-4 shrink-0 mt-0.5 text-amber-400" />
+          <div>
+            <span className="font-semibold">{staleSchedules.length} schedule(s) overdue:</span>{' '}
+            {staleSchedules.map((s) => s.name).join(', ')} — no successful backup within the configured alert window.
+          </div>
+        </div>
+      )}
 
       {schedules.length > 0 && (
         <Card className="p-4 space-y-3">
@@ -230,6 +264,12 @@ export function Schedules({ schedules, onCreate, onEdit, onRefresh, notify }) {
                             DB Dump
                           </Badge>
                         )}
+                        {s.stale && (
+                          <Badge variant="warning" className="text-[10px] py-0 px-1.5">
+                            <AlertTriangle className="h-2.5 w-2.5" />
+                            Overdue
+                          </Badge>
+                        )}
                       </div>
                       <div className="mt-0.5 text-xs text-zinc-500">
                         {s.lastRunAt ? (
@@ -240,6 +280,12 @@ export function Schedules({ schedules, onCreate, onEdit, onRefresh, notify }) {
                           'Never run yet'
                         )}
                       </div>
+                      {s.alertAfterHours > 0 && (
+                        <div className="mt-0.5 text-[11px] text-zinc-500">
+                          Last success: {s.lastSuccessAt ? formatRelativeTime(s.lastSuccessAt) : 'never'} · alert after{' '}
+                          {s.alertAfterHours}h
+                        </div>
+                      )}
                     </td>
                     <td className="px-4 py-3.5">
                       <div className="flex items-center gap-1.5">
@@ -287,6 +333,22 @@ export function Schedules({ schedules, onCreate, onEdit, onRefresh, notify }) {
                           <Edit2 className="h-3.5 w-3.5" />
                         </Button>
                         <Button
+                          variant="ghost"
+                          size="sm"
+                          title="Duplicate (creates a paused copy)"
+                          onClick={() => handleDuplicate(s)}
+                        >
+                          <Copy className="h-3.5 w-3.5" />
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          title="Apply this policy to other targets"
+                          onClick={() => setApplySource(s)}
+                        >
+                          <CopyPlus className="h-3.5 w-3.5" />
+                        </Button>
+                        <Button
                           variant="danger"
                           size="sm"
                           title="Delete"
@@ -303,6 +365,18 @@ export function Schedules({ schedules, onCreate, onEdit, onRefresh, notify }) {
           </div>
         </Card>
       )}
+
+      <ApplyScheduleModal
+        open={Boolean(applySource)}
+        onClose={() => setApplySource(null)}
+        source={applySource}
+        schedules={schedules}
+        stacks={stacks}
+        containers={containers}
+        volumes={volumes}
+        onApplied={onRefresh}
+        notify={notify}
+      />
     </div>
   )
 }

@@ -23,6 +23,41 @@ import {
 } from 'lucide-react'
 import { api, formatBytes, formatDateTime, summarizeNotificationsList } from '../api/client'
 import { Badge, Button, Card, EmptyState, Input, Label, Modal, Select, Switch } from '../components/ui'
+import {
+  desktopNotificationsEnabled,
+  desktopNotificationsSupported,
+  setDesktopNotificationsEnabled,
+} from '../utils/desktopNotifications'
+
+function DesktopNotificationsCard({ notify }) {
+  const supported = desktopNotificationsSupported()
+  const [enabled, setEnabled] = useState(() => desktopNotificationsEnabled())
+
+  async function handleToggle(next) {
+    const effective = await setDesktopNotificationsEnabled(next)
+    setEnabled(effective)
+    if (next && !effective) {
+      notify('error', 'Browser notification permission was denied — allow it in your browser site settings')
+    }
+  }
+
+  return (
+    <Card className="flex items-center justify-between gap-3 p-4">
+      <div className="flex items-start gap-2.5">
+        <Monitor className="mt-0.5 h-4 w-4 shrink-0 text-sky-400" />
+        <div>
+          <div className="text-xs font-medium text-zinc-100">Desktop notifications (this browser)</div>
+          <p className="text-[11px] text-zinc-400">
+            {supported
+              ? 'Show a system notification when a backup finishes or fails while DockVault is in a background tab.'
+              : 'This browser does not support desktop notifications.'}
+          </p>
+        </div>
+      </div>
+      <Switch checked={enabled} onChange={handleToggle} disabled={!supported} />
+    </Card>
+  )
+}
 
 const EMPTY_FORM = {
   name: '',
@@ -890,6 +925,8 @@ export function Settings({
                 Add Channel
               </Button>
             </div>
+
+            <DesktopNotificationsCard notify={notify} />
 
             {notifOverview.configuredCount === 0 ? (
               <EmptyState

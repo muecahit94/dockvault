@@ -126,6 +126,8 @@ type BackupSchedule struct {
 	DBHotDump                bool             `json:"dbHotDump"`
 	ManagedByLabel           bool             `json:"managedByLabel,omitempty"`
 	Enabled                  bool             `json:"enabled"`
+	AlertAfterHours          int              `json:"alertAfterHours"`          // 0 disables stale-backup alerts
+	StaleAlertedAt           *time.Time       `json:"staleAlertedAt,omitempty"` // last stale alert sent; reset by a newer success
 	LastRunAt                *time.Time       `json:"lastRunAt"`
 	LastStatus               string           `gorm:"size:20" json:"lastStatus"`
 	CreatedAt                time.Time        `json:"createdAt"`
@@ -148,6 +150,7 @@ type BackupLog struct {
 	ExcludePatterns      string     `gorm:"type:text" json:"excludePatterns,omitempty"`
 	Encrypted            bool       `json:"encrypted"`
 	Pinned               bool       `gorm:"index" json:"pinned"`
+	Note                 string     `gorm:"size:500" json:"note,omitempty"`
 	Status               string     `gorm:"size:20;not null;index" json:"status"` // "running", "success", "failed"
 	FileName             string     `gorm:"size:255" json:"fileName"`
 	StoragePath          string     `gorm:"size:512" json:"storagePath"`

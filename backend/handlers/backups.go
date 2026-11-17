@@ -34,6 +34,7 @@ type runBackupPayload struct {
 	ExcludePatterns    string   `json:"excludePatterns"`
 	Compression        string   `json:"compression"`
 	DBHotDump          *bool    `json:"dbHotDump"`
+	Note               string   `json:"note"`
 }
 
 // ListBackups returns historical backup logs ordered newest-first.
@@ -95,6 +96,7 @@ func (s *Server) RunBackup(c *fiber.Ctx) error {
 		Compression:        dvcrypto.NormalizeCompression(body.Compression),
 		DBHotDump:          dbHotDump,
 		Trigger:            "manual",
+		Note:               body.Note,
 	})
 	if err != nil {
 		if errors.Is(err, docker.ErrBackupInProgress) {
@@ -316,21 +318,37 @@ func (m multiCloseReader) Close() error {
 
 // VerifyBackup recomputes the archive SHA-256 checksum from storage and compares it against the logged digest.
 func (s *Server) VerifyBackup(c *fiber.Ctx) error {
-	logEntry, provider, driver, status, errMsg := s.openBackupContext(c.Params("id"))
+	res, status, err := s.verifyBackupByID(c.UserContext(), c.Params("id"))
+	if err != nil {
+		return c.Status(status).JSON(fiber.Map{"ok": false, "match": false, "error": err.Error()})
+	}
+	return c.JSON(res)
+}
+
+type verifyResult struct {
+	OK        bool   `json:"ok"`
+	Match     bool   `json:"match"`
+	Expected  string `json:"expected"`
+	Actual    string `json:"actual"`
+	BytesRead int64  `json:"bytesRead"`
+}
+
+func (s *Server) verifyBackupByID(ctx context.Context, rawID string) (*verifyResult, int, error) {
+	logEntry, provider, driver, status, errMsg := s.openBackupContext(rawID)
 	if status != 0 {
-		return c.Status(status).JSON(fiber.Map{"error": errMsg})
+		return nil, status, errors.New(errMsg)
 	}
 
-	reader, _, err := driver.Open(c.UserContext(), logEntry.StoragePath)
+	reader, _, err := driver.Open(ctx, logEntry.StoragePath)
 	if err != nil {
-		return c.Status(httpStatusForArchiveErr(err)).JSON(fiber.Map{"error": err.Error()})
+		return nil, httpStatusForArchiveErr(err), err
 	}
 	defer reader.Close()
 
 	hasher := sha256.New()
 	bytesRead, err := io.Copy(hasher, reader)
 	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+		return nil, fiber.StatusInternalServerError, err
 	}
 
 	actual := hex.EncodeToString(hasher.Sum(nil))
@@ -338,24 +356,24 @@ func (s *Server) VerifyBackup(c *fiber.Ctx) error {
 
 	// For encrypted backups, also verify passphrase decryption succeeds when a checksum matched.
 	if match && (logEntry.Encrypted || strings.HasSuffix(logEntry.StoragePath, ".enc")) {
-		decReader, _, decErr := s.openArchiveStream(c.UserContext(), logEntry, provider, driver, true)
+		decReader, _, decErr := s.openArchiveStream(ctx, logEntry, provider, driver, true)
 		if decErr != nil {
-			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"ok": false, "match": false, "error": decErr.Error()})
+			return nil, fiber.StatusBadRequest, decErr
 		}
 		_, copyErr := io.Copy(io.Discard, decReader)
 		_ = decReader.Close()
 		if copyErr != nil {
-			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"ok": false, "match": false, "error": copyErr.Error()})
+			return nil, fiber.StatusBadRequest, copyErr
 		}
 	}
 
-	return c.JSON(fiber.Map{
-		"ok":        match,
-		"match":     match,
-		"expected":  logEntry.ChecksumSHA256,
-		"actual":    actual,
-		"bytesRead": bytesRead,
-	})
+	return &verifyResult{
+		OK:        match,
+		Match:     match,
+		Expected:  logEntry.ChecksumSHA256,
+		Actual:    actual,
+		BytesRead: bytesRead,
+	}, 0, nil
 }
 
 // RestoreBackup extracts a backup archive back into original mounts or a staging volume.
@@ -371,9 +389,10 @@ func (s *Server) RestoreBackup(c *fiber.Ctx) error {
 	}
 
 	var body struct {
-		PauseContainer   *bool  `json:"pauseContainer"`
-		TargetVolumeName string `json:"targetVolumeName"`
-		PreRestoreBackup *bool  `json:"preRestoreBackup"`
+		PauseContainer   *bool    `json:"pauseContainer"`
+		TargetVolumeName string   `json:"targetVolumeName"`
+		PreRestoreBackup *bool    `json:"preRestoreBackup"`
+		Paths            []string `json:"paths"`
 	}
 	if len(c.Body()) > 0 {
 		_ = c.BodyParser(&body)
@@ -391,6 +410,7 @@ func (s *Server) RestoreBackup(c *fiber.Ctx) error {
 		PauseContainer:   pause,
 		TargetVolumeName: strings.TrimSpace(body.TargetVolumeName),
 		PreRestoreBackup: preSnap,
+		Paths:            body.Paths,
 	})
 	if err != nil {
 		if errors.Is(err, docker.ErrBackupInProgress) || errors.Is(err, storage.ErrAzureArchiveTier) {
@@ -592,29 +612,33 @@ func (s *Server) DeleteBackup(c *fiber.Ctx) error {
 			"error": "invalid backup id",
 		})
 	}
+	deleteFile := c.Query("deleteFile", "true") != "false"
+	if status, err := s.deleteBackupByID(c.UserContext(), uint(id), deleteFile); err != nil {
+		return c.Status(status).JSON(fiber.Map{"error": err.Error()})
+	}
+	return c.JSON(fiber.Map{"deleted": true})
+}
 
+func (s *Server) deleteBackupByID(ctx context.Context, id uint, deleteFile bool) (int, error) {
 	var logEntry models.BackupLog
 	if err := s.db.First(&logEntry, id).Error; err != nil {
-		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{
-			"error": "backup log not found",
-		})
+		return fiber.StatusNotFound, errors.New("backup log not found")
+	}
+	if logEntry.Status == "running" {
+		return fiber.StatusConflict, errors.New("cannot delete a running backup")
 	}
 
-	deleteFile := c.Query("deleteFile", "true") != "false"
 	if deleteFile && logEntry.Status == "success" && logEntry.StoragePath != "" {
 		var provider models.StorageProvider
 		if err := s.db.First(&provider, logEntry.StorageProviderID).Error; err == nil {
 			if driver, err := storage.NewDriver(provider, s.cfg.BackupDir); err == nil {
-				_ = driver.Delete(c.UserContext(), logEntry.StoragePath)
+				_ = driver.Delete(ctx, logEntry.StoragePath)
 			}
 		}
 	}
 
 	if err := s.db.Delete(&logEntry).Error; err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-			"error": err.Error(),
-		})
+		return fiber.StatusInternalServerError, err
 	}
-
-	return c.JSON(fiber.Map{"deleted": true})
+	return 0, nil
 }
