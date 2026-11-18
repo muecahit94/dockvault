@@ -8,7 +8,7 @@
 [![Architectures](https://img.shields.io/badge/arch-amd64%20%7C%20arm64-007ec6?logo=docker)](https://hub.docker.com/r/muecahit/dockvault/tags)
 [![License](https://img.shields.io/badge/license-MIT-007ec6)](https://github.com/muecahit94/dockvault/blob/main/LICENSE)
 
-DockVault is a lightweight, single-container backup appliance with a clean web UI for Docker containers, Compose stacks, bind mounts, and orphan volumes. Connect `/var/run/docker.sock` and manage encrypted backups, S3/Azure replication, retention pruning, alerting, and one-click recovery without custom scripts.
+I originally built DockVault for my own homelab as a simple, reliable, and easy-to-set-up backup solution for Docker and Docker Compose environments. Deploy it as a single lightweight container (`docker compose up -d`), mount `/var/run/docker.sock`, and manage encrypted backups, S3/Azure replication, retention pruning, alerting, and one-click recovery from a clean web UI—without maintaining custom backup scripts for every stack.
 
 - **Source & Full Documentation:** [github.com/muecahit94/dockvault](https://github.com/muecahit94/dockvault)
 - **Container Registries:** `muecahit/dockvault` (Docker Hub) & `ghcr.io/muecahit94/dockvault` (GHCR)

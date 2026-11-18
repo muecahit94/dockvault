@@ -38,7 +38,9 @@ Automatically discover running containers, Compose stacks, and named volumes—b
 
 ## What is DockVault?
 
-DockVault runs as a single lightweight container with read/control access to `/var/run/docker.sock`. Instead of writing custom backup scripts for every Compose project, DockVault inspects your Docker Engine, groups containers into Compose stacks, finds every attached volume and bind mount (plus unattached orphan volumes), and handles consistent `.tar.gz` archiving, encryption, scheduling, retention pruning, alerting, and one-click recovery from a clean web UI.
+I originally built DockVault for my own homelab because maintaining custom cron + `tar` backup scripts for every self-hosted Docker Compose stack quickly gets tedious and fragile. It is designed to be an easy-to-set-up, drop-in backup solution for any Docker or Docker Compose homelab: deploy a single lightweight container with `/var/run/docker.sock` mounted, run `docker compose up -d`, and manage everything from a clean web UI.
+
+Instead of configuring every service manually, DockVault inspects your Docker Engine, groups containers into Compose stacks, finds every attached volume and bind mount (plus unattached orphan volumes), and handles consistent `.tar.gz` / `.tar.zst` archiving, encryption, scheduling, retention pruning, alerting, and one-click recovery.
 
 ---
 
