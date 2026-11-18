@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.4.1](https://github.com/muecahit94/dockvault/compare/v0.4.0...v0.4.1) (2026-11-18)
+
+
+### Bug Fixes
+
+* harden restore verification, DB dump ordering, and E2E suites ([85ce34d](https://github.com/muecahit94/dockvault/commit/85ce34daad6d30104cc97bd2da84fb804d2c0b8c))
+* harden restore verification, DB dump ordering, and E2E suites ([f9b848d](https://github.com/muecahit94/dockvault/commit/f9b848d2640acf8cc0f9136ba439252fc6a4bf8e))
+
 ## [0.4.0](https://github.com/muecahit94/dockvault/compare/v0.3.0...v0.4.0) (2026-11-17)
 
 
