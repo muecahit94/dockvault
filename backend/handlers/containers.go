@@ -16,12 +16,19 @@ func (s *Server) ListContainers(c *fiber.Ctx) error {
 	}
 
 	latest := s.latestBackupByTarget("container")
+	restoreState := computeRestoreState(s.db, 200)
 	for i := range containers {
 		if entry, ok := latest[containers[i].Name]; ok {
 			t := entry.StartedAt
 			containers[i].LastBackupAt = &t
 			containers[i].LastBackupStatus = entry.Status
 		}
+		containers[i].LastRestore = resolveTargetRestore(
+			"container",
+			containers[i].Name,
+			containers[i].ComposeProject,
+			restoreState,
+		)
 	}
 
 	return c.JSON(fiber.Map{
@@ -40,12 +47,14 @@ func (s *Server) ListStacks(c *fiber.Ctx) error {
 	}
 
 	latest := s.latestBackupByTarget("stack")
+	restoreState := computeRestoreState(s.db, 200)
 	for i := range stacks {
 		if entry, ok := latest[stacks[i].Name]; ok {
 			t := entry.StartedAt
 			stacks[i].LastBackupAt = &t
 			stacks[i].LastBackupStatus = entry.Status
 		}
+		stacks[i].LastRestore = resolveTargetRestore("stack", stacks[i].Name, "", restoreState)
 	}
 
 	return c.JSON(fiber.Map{

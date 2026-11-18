@@ -8,7 +8,7 @@
 [![Architectures](https://img.shields.io/badge/arch-amd64%20%7C%20arm64-007ec6?logo=docker)](https://hub.docker.com/r/muecahit/dockvault/tags)
 [![License](https://img.shields.io/badge/license-MIT-007ec6)](https://github.com/muecahit94/dockvault/blob/main/LICENSE)
 
-I originally built DockVault for my own homelab as a simple, reliable, and easy-to-set-up backup solution for Docker and Docker Compose environments. Deploy it as a single lightweight container (`docker compose up -d`), mount `/var/run/docker.sock`, and manage encrypted backups, S3/Azure replication, retention pruning, alerting, and one-click recovery from a clean web UI—without maintaining custom backup scripts for every stack.
+I originally built DockVault for my own homelab as a simple, reliable, and easy-to-set-up backup solution for Docker and Docker Compose environments. Deploy it as a single lightweight container (`docker compose up -d`), mount `/var/run/docker.sock`, and manage encrypted backups, S3/Azure/SSH/SMB/NFS storage & replication, multi-target schedules, retention pruning, alerting, and tracked restores from a clean web UI—without maintaining custom backup scripts for every stack.
 
 - **Source & Full Documentation:** [github.com/muecahit94/dockvault](https://github.com/muecahit94/dockvault)
 - **Container Registries:** `muecahit/dockvault` (Docker Hub) & `ghcr.io/muecahit94/dockvault` (GHCR)
@@ -49,6 +49,8 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock # Discover containers & stream volumes
       - ./data:/app/data                          # SQLite database & settings
       - ./backups:/app/backups                    # Default local backup directory
+      # Optional: mount host SSH keys for container-local SSH/SFTP destination auth
+      # - ~/.ssh:/root/.ssh:ro
 ```
 
 ```bash
@@ -75,14 +77,14 @@ docker run -d \
 
 ## Key Features
 
-- **Automatic Docker & Compose Discovery** — Groups Compose stacks (`com.docker.compose.project`), lists all attached mounts, and surfaces unattached orphan volumes.
+- **Automatic Docker & Compose Discovery** — Groups Compose stacks (`com.docker.compose.project`), lists all attached mounts, surfaces unattached orphan volumes, and displays configured schedules and active rollback versions directly on stacks and containers.
 - **Zero-Downtime DB Hot Dumps** — Auto-detects `postgres`, `mysql`, `mariadb`, `mongodb`, and `redis` and appends consistent database dumps into `db_dumps/` inside the archive without pausing DB containers.
 - **Pause-Consistent Snapshots & Exclude Patterns** — Temporarily pauses target containers (configurable), skips `.gitignore`-style `--exclude` globs, and streams `gzip` or `zstd` archives via a lightweight Alpine helper.
-- **Local, S3 & Azure Blob + 3-2-1 Replication** — Store locally (`/app/backups`), on S3-compatible object storage (AWS S3, MinIO, R2, B2, Wasabi), or Azure Blob Storage (Account Key, Entra ID Service Principal, Connection String, SAS), with automatic secondary offsite replication and **Scan & Import** disaster recovery.
-- **Client-Side AES-256-GCM Encryption** — Encrypts archives locally (`scrypt` + chunked AES-256-GCM `.enc`) with an **Encryption & Key Health** overview, SHA-256 verification, in-browser archive tree inspection, and single-file extraction.
-- **Safer Restores** — Restore in place or into an isolated **Staging Volume**, with an optional **Pre-Restore Safety Snapshot** created automatically before modifying data.
-- **Observability & Analytics** — Real-time SSE **Live Backup Progress & Job Step Timeline**, **30/90-Day Backup Health Heatmap**, **24-Hour Cron Schedule Timeline**, and **Storage Analytics & Footprint** breakdown.
-- **Scheduling, Retention & Alerts** — Cron schedules (`TZ`-aware), Keep-N / GFS retention with snapshot pinning, declarative **GitOps Labels**, reusable schedule policies, overdue-backup alerts, and independent **Telegram**, **Discord**, **Slack**, **ntfy**, or **Webhook** alerts.
+- **Local, S3, Azure, SSH/SFTP, SMB & NFS + 3-2-1 Replication** — Store locally (`/app/backups`), on S3-compatible storage (AWS S3, MinIO, R2, B2, Wasabi), Azure Blob Storage (Account Key, Entra ID Service Principal, Connection String, SAS), SSH/SFTP (password, pasted key, or mounted container SSH key in `~/.ssh`), SMB/CIFS shares, or NFSv3 exports—all user-space without `CAP_SYS_ADMIN`, with 3-2-1 replication and **Scan & Import** disaster recovery.
+- **Client-Side AES-256-GCM Encryption** — Encrypts archives locally (`scrypt` + chunked AES-256-GCM `.enc`) with an **Encryption & Security Health** overview, SHA-256 verification, in-browser archive tree inspection, and single-file extraction.
+- **Safer Restores & Rollback Visibility** — Restore in place or into an isolated **Staging Volume** with an optional **Pre-Restore Safety Snapshot**, and inspect the persisted **Restore Log** and **Rolled back / Current version** badges across Dashboard, History, and Containers.
+- **Observability & Analytics** — Real-time SSE **Live Backup Progress & Job Step Timeline**, **7d/30d/90d Backup Health Heatmap**, **24-Hour Cron Schedule Timeline**, and **Storage Analytics & Footprint** breakdown.
+- **Multi-Target Schedules, Retention & Alerts** — Activate multiple stacks, containers, or volumes in a single cron schedule (`TZ`-aware), Keep-N / GFS retention with snapshot pinning, declarative **GitOps Labels**, reusable schedule policies, overdue-backup alerts, and independent **Telegram**, **Discord**, **Slack**, **ntfy**, or **Webhook** alerts.
 - **Notes, Compare & Selective Restore** — Annotate backups, diff two snapshots, bulk pin/verify/delete, and restore only selected files or folders.
 - **Auth & Reverse-Proxy SSO** — Built-in `bcrypt` login or trusted reverse-proxy header SSO (`Remote-User` / Authentik / Authelia) plus optional iframe embedding (`DOCKVAULT_FRAME_ANCESTORS`).
 
@@ -95,6 +97,7 @@ docker run -d \
 | `/var/run/docker.sock` | Read/control access to discover containers, stacks, and stream volumes |
 | `/app/data` | Persistent SQLite database (`dockvault.db`) and configuration |
 | `/app/backups` | Default local backup archive storage |
+| `/root/.ssh` _(optional)_ | Read-only mount for container-local SSH private keys used by SSH/SFTP destinations |
 | `8080/tcp` | Web UI and REST API port (configurable via `DOCKVAULT_PORT`) |
 
 ---

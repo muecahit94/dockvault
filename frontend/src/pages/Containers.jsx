@@ -7,13 +7,15 @@ import {
   Database,
   HardDrive,
   Layers,
+  PauseCircle,
   RefreshCw,
+  RotateCcw,
   Search,
   ShieldAlert,
   Terminal,
   Trash2,
 } from 'lucide-react'
-import { api, formatRelativeTime } from '../api/client'
+import { api, formatDateTime, formatRelativeTime } from '../api/client'
 import { Badge, Button, Card, EmptyState, Input, Switch } from '../components/ui'
 
 function stateVariant(state) {
@@ -22,10 +24,62 @@ function stateVariant(state) {
   return 'neutral'
 }
 
+function scheduleListFor(map, ...keys) {
+  const seen = new Set()
+  const out = []
+  for (const k of keys) {
+    if (!k) continue
+    for (const s of map.get(k) || []) {
+      if (!seen.has(s.id)) {
+        seen.add(s.id)
+        out.push(s)
+      }
+    }
+  }
+  return out
+}
+
+function SchedulePill({ schedule, viaStack = '', onEdit }) {
+  const titleParts = [
+    schedule.name,
+    `Cron: ${schedule.cronExpr}`,
+    schedule.enabled
+      ? schedule.nextRunAt
+        ? `Next run: ${formatDateTime(schedule.nextRunAt)}`
+        : 'Enabled'
+      : 'Paused',
+    viaStack ? `Inherited from stack "${viaStack}"` : '',
+  ].filter(Boolean)
+
+  return (
+    <button
+      type="button"
+      onClick={() => onEdit?.(schedule)}
+      title={titleParts.join(' · ')}
+      className="inline-flex cursor-pointer items-center"
+    >
+      <Badge variant={schedule.enabled ? 'info' : 'warning'} className="hover:brightness-110">
+        {schedule.enabled ? (
+          <CalendarClock className="h-3 w-3 shrink-0" />
+        ) : (
+          <PauseCircle className="h-3 w-3 shrink-0" />
+        )}
+        <span>
+          {viaStack ? `${viaStack}: ` : ''}
+          {schedule.name}
+        </span>
+        <span className="font-mono text-[10px] opacity-90">{schedule.cronExpr}</span>
+        {!schedule.enabled && <span className="opacity-90">(Paused)</span>}
+      </Badge>
+    </button>
+  )
+}
+
 export function Containers({
   containers,
   stacks,
   volumes = [],
+  schedules = [],
   loading,
   defaultTab = 'stacks',
   includeStopped,
@@ -37,6 +91,34 @@ export function Containers({
 }) {
   const [view, setView] = useState(defaultTab || 'stacks')
   const [query, setQuery] = useState('')
+
+  const schedulesByType = useMemo(() => {
+    const maps = {
+      stack: new Map(),
+      container: new Map(),
+      volume: new Map(),
+    }
+    const add = (map, key, sched) => {
+      if (!key) return
+      const existing = map.get(key) || []
+      existing.push(sched)
+      map.set(key, existing)
+    }
+    for (const s of schedules) {
+      const targets = s.targets?.length
+        ? s.targets
+        : [{ targetType: s.targetType, targetId: s.targetId, targetName: s.targetName }]
+      for (const tgt of targets) {
+        const targetMap = maps[tgt.targetType]
+        if (!targetMap) continue
+        add(targetMap, tgt.targetId, s)
+        if (tgt.targetName && tgt.targetName !== tgt.targetId) {
+          add(targetMap, tgt.targetName, s)
+        }
+      }
+    }
+    return maps
+  }, [schedules])
 
   const filteredStacks = useMemo(() => {
     const q = query.trim().toLowerCase()
@@ -166,7 +248,9 @@ export function Containers({
             />
           ) : (
             <div className="grid grid-cols-1 gap-4">
-              {filteredStacks.map((stack) => (
+              {filteredStacks.map((stack) => {
+                const stackSchedules = scheduleListFor(schedulesByType.stack, stack.name)
+                return (
                 <Card key={stack.name} className="p-5">
                   <div className="flex flex-wrap items-start justify-between gap-4">
                     <div>
@@ -189,12 +273,32 @@ export function Containers({
                             GitOps: {stack.gitopsSchedule}
                           </Badge>
                         )}
+                        {stackSchedules.length > 0 ? (
+                          stackSchedules.map((sched) => (
+                            <SchedulePill
+                              key={sched.id}
+                              schedule={sched}
+                              onEdit={(s) => onOpenSchedule(null, s)}
+                            />
+                          ))
+                        ) : (
+                          <Badge variant="warning">No schedule</Badge>
+                        )}
                         {stack.lastBackupAt ? (
                           <Badge variant={stack.lastBackupStatus === 'failed' ? 'danger' : 'neutral'}>
                             Last backup {formatRelativeTime(stack.lastBackupAt)}
                           </Badge>
                         ) : (
                           <Badge variant="warning">Never backed up</Badge>
+                        )}
+                        {stack.lastRestore?.isActiveRollback && (
+                          <Badge
+                            variant="info"
+                            title={`Rolled back to backup #${stack.lastRestore.backupLogId} (${stack.lastRestore.backupFileName}) on ${formatDateTime(stack.lastRestore.restoredAt)}`}
+                          >
+                            <RotateCcw className="h-2.5 w-2.5" />
+                            Rolled back → #{stack.lastRestore.backupLogId} ({formatDateTime(stack.lastRestore.backupStartedAt)})
+                          </Badge>
                         )}
                       </div>
                       {stack.configFiles && (
@@ -254,28 +358,42 @@ export function Containers({
                         Services ({stack.containers.length})
                       </div>
                       <div className="space-y-1.5">
-                        {stack.containers.map((c) => (
-                          <div
-                            key={c.id}
-                            className="flex items-center justify-between gap-2 text-xs"
-                          >
-                            <div className="flex items-center gap-2 min-w-0">
-                              <span className="truncate font-medium text-zinc-200">
-                                {c.composeService || c.name}
-                              </span>
-                              <span className="truncate font-mono text-[11px] text-zinc-500">
-                                {c.image}
-                              </span>
-                              {(c.preHook || c.postHook) && (
-                                <Badge variant="info" className="text-[10px] py-0">
-                                  <Terminal className="h-2.5 w-2.5" />
-                                  Hook
-                                </Badge>
-                              )}
+                        {stack.containers.map((c) => {
+                          const directSchedules = scheduleListFor(
+                            schedulesByType.container,
+                            c.id,
+                            c.name,
+                          )
+                          return (
+                            <div
+                              key={c.id}
+                              className="flex items-center justify-between gap-2 text-xs"
+                            >
+                              <div className="flex flex-wrap items-center gap-2 min-w-0">
+                                <span className="truncate font-medium text-zinc-200">
+                                  {c.composeService || c.name}
+                                </span>
+                                <span className="truncate font-mono text-[11px] text-zinc-500">
+                                  {c.image}
+                                </span>
+                                {(c.preHook || c.postHook) && (
+                                  <Badge variant="info" className="text-[10px] py-0">
+                                    <Terminal className="h-2.5 w-2.5" />
+                                    Hook
+                                  </Badge>
+                                )}
+                                {directSchedules.map((sched) => (
+                                  <SchedulePill
+                                    key={sched.id}
+                                    schedule={sched}
+                                    onEdit={(s) => onOpenSchedule(null, s)}
+                                  />
+                                ))}
+                              </div>
+                              <Badge variant={stateVariant(c.state)}>{c.state}</Badge>
                             </div>
-                            <Badge variant={stateVariant(c.state)}>{c.state}</Badge>
-                          </div>
-                        ))}
+                          )
+                        })}
                       </div>
                     </div>
 
@@ -303,7 +421,8 @@ export function Containers({
                     </div>
                   </div>
                 </Card>
-              ))}
+                )
+              })}
             </div>
           )}
         </>
@@ -327,6 +446,7 @@ export function Containers({
                       <th className="px-4 py-3 font-medium">Container</th>
                       <th className="px-4 py-3 font-medium">State</th>
                       <th className="px-4 py-3 font-medium">Compose</th>
+                      <th className="px-4 py-3 font-medium">Schedule</th>
                       <th className="px-4 py-3 font-medium">Attached Volumes / Mounts</th>
                       <th className="px-4 py-3 font-medium text-right">Actions</th>
                     </tr>
@@ -334,6 +454,14 @@ export function Containers({
                   <tbody className="divide-y divide-zinc-800/70">
                     {filteredContainers.map((c) => {
                       const backupableMounts = (c.mounts || []).filter((m) => m.backupable)
+                      const directSchedules = scheduleListFor(
+                        schedulesByType.container,
+                        c.id,
+                        c.name,
+                      )
+                      const stackSchedules = c.composeProject
+                        ? scheduleListFor(schedulesByType.stack, c.composeProject)
+                        : []
                       return (
                         <tr key={c.id} className="hover:bg-zinc-900/50 transition-colors">
                           <td className="px-4 py-3.5 align-top">
@@ -368,6 +496,14 @@ export function Containers({
                                 Last backup: {formatRelativeTime(c.lastBackupAt)} ({c.lastBackupStatus})
                               </div>
                             )}
+                            {c.lastRestore?.isActiveRollback && (
+                              <div className="mt-1 inline-flex items-center gap-1 text-[11px] text-sky-400">
+                                <RotateCcw className="h-2.5 w-2.5 shrink-0" />
+                                <span>
+                                  Rolled back to #{c.lastRestore.backupLogId} ({formatDateTime(c.lastRestore.backupStartedAt)})
+                                </span>
+                              </div>
+                            )}
                           </td>
 
                           <td className="px-4 py-3.5 align-top">
@@ -387,6 +523,35 @@ export function Containers({
                               </div>
                             ) : (
                               <span className="text-xs text-zinc-500">Standalone</span>
+                            )}
+                          </td>
+
+                          <td className="px-4 py-3.5 align-top">
+                            {directSchedules.length > 0 ? (
+                              <div className="flex flex-col items-start gap-1">
+                                {directSchedules.map((sched) => (
+                                  <SchedulePill
+                                    key={sched.id}
+                                    schedule={sched}
+                                    onEdit={(s) => onOpenSchedule(null, s)}
+                                  />
+                                ))}
+                              </div>
+                            ) : stackSchedules.length > 0 ? (
+                              <div className="flex flex-col items-start gap-1">
+                                {stackSchedules.map((sched) => (
+                                  <SchedulePill
+                                    key={sched.id}
+                                    schedule={sched}
+                                    viaStack={c.composeProject}
+                                    onEdit={(s) => onOpenSchedule(null, s)}
+                                  />
+                                ))}
+                              </div>
+                            ) : c.excluded || c.isSelf ? (
+                              <span className="text-xs text-zinc-500">—</span>
+                            ) : (
+                              <Badge variant="warning">No schedule</Badge>
                             )}
                           </td>
 
@@ -498,10 +663,23 @@ export function Containers({
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-zinc-800/70">
-                    {filteredVolumes.map((v) => (
+                    {filteredVolumes.map((v) => {
+                      const volumeSchedules = scheduleListFor(schedulesByType.volume, v.name)
+                      return (
                       <tr key={v.name} className="hover:bg-zinc-900/50 transition-colors">
                         <td className="px-4 py-3.5 align-top">
                           <div className="font-mono text-xs font-medium text-zinc-100">{v.name}</div>
+                          {volumeSchedules.length > 0 && (
+                            <div className="mt-1.5 flex flex-wrap gap-1">
+                              {volumeSchedules.map((sched) => (
+                                <SchedulePill
+                                  key={sched.id}
+                                  schedule={sched}
+                                  onEdit={(s) => onOpenSchedule(null, s)}
+                                />
+                              ))}
+                            </div>
+                          )}
                           {v.lastBackupAt && (
                             <div className="mt-1 text-[11px] text-zinc-500">
                               Last backup: {formatRelativeTime(v.lastBackupAt)} ({v.lastBackupStatus})
@@ -582,7 +760,8 @@ export function Containers({
                           </div>
                         </td>
                       </tr>
-                    ))}
+                      )
+                    })}
                   </tbody>
                 </table>
               </div>

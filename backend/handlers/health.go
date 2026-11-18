@@ -7,6 +7,7 @@ import (
 
 	"github.com/gofiber/fiber/v2"
 	dvcrypto "github.com/muecahit94/dockvault/crypto"
+	"github.com/muecahit94/dockvault/docker"
 	"github.com/muecahit94/dockvault/models"
 )
 
@@ -27,8 +28,11 @@ func (s *Server) GetDashboard(c *fiber.Ctx) error {
 	containersTotal := 0
 	containersRunning := 0
 	stacksTotal := 0
+	var containers []docker.ContainerInfo
+	var stacks []docker.ComposeStackInfo
 	if dockerStatus.Connected {
-		if containers, err := s.dockerSvc.ListContainers(c.UserContext(), true); err == nil {
+		if listed, err := s.dockerSvc.ListContainers(c.UserContext(), true); err == nil {
+			containers = listed
 			containersTotal = len(containers)
 			for _, ctr := range containers {
 				if ctr.State == "running" {
@@ -36,13 +40,11 @@ func (s *Server) GetDashboard(c *fiber.Ctx) error {
 				}
 			}
 		}
-		if stacks, err := s.dockerSvc.ListStacks(c.UserContext(), true); err == nil {
+		if listed, err := s.dockerSvc.ListStacks(c.UserContext(), true); err == nil {
+			stacks = listed
 			stacksTotal = len(stacks)
 		}
 	}
-
-	var activeSchedules int64
-	s.db.Model(&models.BackupSchedule{}).Where("enabled = ?", true).Count(&activeSchedules)
 
 	var totalBackups int64
 	s.db.Model(&models.BackupLog{}).Count(&totalBackups)
@@ -65,8 +67,8 @@ func (s *Server) GetDashboard(c *fiber.Ctx) error {
 	var recentBackups []models.BackupLog
 	s.db.Order("started_at desc").Limit(8).Find(&recentBackups)
 
-	var schedules []models.BackupSchedule
-	s.db.Preload("StorageProvider").Where("enabled = ?", true).Order("id asc").Find(&schedules)
+	var allSchedules []models.BackupSchedule
+	s.db.Preload("StorageProvider").Order("id asc").Find(&allSchedules)
 
 	type upcomingItem struct {
 		ID           uint       `json:"id"`
@@ -79,8 +81,13 @@ func (s *Server) GetDashboard(c *fiber.Ctx) error {
 		StorageTitle string     `json:"storageTitle"`
 	}
 
-	upcoming := make([]upcomingItem, 0, len(schedules))
-	for _, sched := range schedules {
+	var activeSchedules int64
+	upcoming := make([]upcomingItem, 0, len(allSchedules))
+	for _, sched := range allSchedules {
+		if !sched.Enabled {
+			continue
+		}
+		activeSchedules++
 		storageTitle := ""
 		if sched.StorageProvider != nil {
 			storageTitle = sched.StorageProvider.Name
@@ -96,6 +103,14 @@ func (s *Server) GetDashboard(c *fiber.Ctx) error {
 			StorageTitle: storageTitle,
 		})
 	}
+
+	restoreState := computeRestoreState(s.db, 100)
+	recentRestores := restoreState.Restores
+	if len(recentRestores) > 8 {
+		recentRestores = recentRestores[:8]
+	}
+
+	scheduleCoverage := buildScheduleCoverage(containers, stacks, allSchedules, restoreState, s.schedMgr.NextRun)
 
 	type dailyPoint struct {
 		Date    string `json:"date"`
@@ -238,7 +253,10 @@ func (s *Server) GetDashboard(c *fiber.Ctx) error {
 			"storageProviders":  storageProviders,
 		},
 		"recentBackups":     recentBackups,
+		"recentRestores":    recentRestores,
+		"activeRollbacks":   restoreState.ActiveRollbacks,
 		"upcomingSchedules": upcoming,
+		"scheduleCoverage":  scheduleCoverage,
 		"dailyActivity":     dailyActivity,
 		"storageAnalytics": fiber.Map{
 			"disk":       readDiskUsage(s.cfg.BackupDir),
@@ -262,4 +280,162 @@ func (s *Server) GetDashboard(c *fiber.Ctx) error {
 			"globalKeyConfigured":    strings.TrimSpace(s.cfg.EncryptionKey) != "",
 		},
 	})
+}
+
+type scheduleCoverageItem struct {
+	TargetType      string     `json:"targetType"`
+	TargetID        string     `json:"targetId"`
+	TargetName      string     `json:"targetName"`
+	State           string     `json:"state,omitempty"`
+	ComposeProject  string     `json:"composeProject,omitempty"`
+	BackupableCount int        `json:"backupableCount"`
+	RunningCount    int        `json:"runningCount,omitempty"`
+	TotalCount      int        `json:"totalCount,omitempty"`
+	Excluded        bool       `json:"excluded,omitempty"`
+	IsSelf          bool       `json:"isSelf,omitempty"`
+	Scheduled       bool       `json:"scheduled"`
+	Enabled         bool       `json:"enabled"`
+	ScheduleID      uint       `json:"scheduleId,omitempty"`
+	ScheduleName    string     `json:"scheduleName,omitempty"`
+	CronExpr        string     `json:"cronExpr,omitempty"`
+	NextRunAt       *time.Time `json:"nextRunAt,omitempty"`
+	LastStatus      string     `json:"lastStatus,omitempty"`
+	ViaStack        string                 `json:"viaStack,omitempty"`
+	ManagedByLabel  bool                   `json:"managedByLabel,omitempty"`
+	GitOpsSchedule  string                 `json:"gitopsSchedule,omitempty"`
+	DetectedDBs     []string               `json:"detectedDbs,omitempty"`
+	LastRestore     *docker.RestoreSummary `json:"lastRestore,omitempty"`
+}
+
+type scheduleCoverageSummary struct {
+	Stacks              []scheduleCoverageItem `json:"stacks"`
+	Containers          []scheduleCoverageItem `json:"containers"`
+	StacksScheduled     int                    `json:"stacksScheduled"`
+	StacksTotal         int                    `json:"stacksTotal"`
+	ContainersScheduled int                    `json:"containersScheduled"`
+	ContainersTotal     int                    `json:"containersTotal"`
+}
+
+// pickPreferredSchedule prefers enabled schedules over paused ones when multiple match a target.
+func pickPreferredSchedule(current, candidate *models.BackupSchedule) *models.BackupSchedule {
+	if candidate == nil {
+		return current
+	}
+	if current == nil || (!current.Enabled && candidate.Enabled) {
+		return candidate
+	}
+	return current
+}
+
+func applyScheduleMatch(item *scheduleCoverageItem, sched *models.BackupSchedule, viaStack string, nextRunFn func(uint) *time.Time) {
+	if sched == nil {
+		return
+	}
+	item.Scheduled = true
+	item.Enabled = sched.Enabled
+	item.ScheduleID = sched.ID
+	item.ScheduleName = sched.Name
+	item.CronExpr = sched.CronExpr
+	item.LastStatus = sched.LastStatus
+	item.ViaStack = viaStack
+	item.ManagedByLabel = sched.ManagedByLabel
+	if sched.Enabled && nextRunFn != nil {
+		item.NextRunAt = nextRunFn(sched.ID)
+	}
+}
+
+// buildScheduleCoverage maps discovered Compose stacks and containers to any configured backup schedule.
+func buildScheduleCoverage(
+	containers []docker.ContainerInfo,
+	stacks []docker.ComposeStackInfo,
+	schedules []models.BackupSchedule,
+	restoreState restoreStateSummary,
+	nextRunFn func(uint) *time.Time,
+) scheduleCoverageSummary {
+	stackSchedules := make(map[string]*models.BackupSchedule)
+	containerSchedules := make(map[string]*models.BackupSchedule)
+
+	for i := range schedules {
+		sched := &schedules[i]
+		for _, tgt := range sched.ResolvedTargets() {
+			switch tgt.TargetType {
+			case "stack":
+				if tgt.TargetID != "" {
+					stackSchedules[tgt.TargetID] = pickPreferredSchedule(stackSchedules[tgt.TargetID], sched)
+				}
+				if tgt.TargetName != "" {
+					stackSchedules[tgt.TargetName] = pickPreferredSchedule(stackSchedules[tgt.TargetName], sched)
+				}
+			case "container":
+				if tgt.TargetID != "" {
+					containerSchedules[tgt.TargetID] = pickPreferredSchedule(containerSchedules[tgt.TargetID], sched)
+				}
+				if tgt.TargetName != "" {
+					containerSchedules[tgt.TargetName] = pickPreferredSchedule(containerSchedules[tgt.TargetName], sched)
+				}
+			}
+		}
+	}
+
+	summary := scheduleCoverageSummary{
+		Stacks:     make([]scheduleCoverageItem, 0, len(stacks)),
+		Containers: make([]scheduleCoverageItem, 0, len(containers)),
+	}
+
+	for _, st := range stacks {
+		item := scheduleCoverageItem{
+			TargetType:      "stack",
+			TargetID:        st.Name,
+			TargetName:      st.Name,
+			BackupableCount: st.BackupableCount,
+			RunningCount:    st.RunningCount,
+			TotalCount:      st.TotalCount,
+			GitOpsSchedule:  st.GitOpsSchedule,
+			DetectedDBs:     st.DetectedDBs,
+			LastRestore:     resolveTargetRestore("stack", st.Name, "", restoreState),
+		}
+		applyScheduleMatch(&item, stackSchedules[st.Name], "", nextRunFn)
+		summary.Stacks = append(summary.Stacks, item)
+		summary.StacksTotal++
+		if item.Scheduled {
+			summary.StacksScheduled++
+		}
+	}
+
+	for _, ctr := range containers {
+		item := scheduleCoverageItem{
+			TargetType:      "container",
+			TargetID:        ctr.ID,
+			TargetName:      ctr.Name,
+			State:           ctr.State,
+			ComposeProject:  ctr.ComposeProject,
+			BackupableCount: ctr.BackupableCount,
+			Excluded:        ctr.Excluded,
+			IsSelf:          ctr.IsSelf,
+			GitOpsSchedule:  ctr.GitOpsSchedule,
+			LastRestore:     resolveTargetRestore("container", ctr.Name, ctr.ComposeProject, restoreState),
+		}
+		if ctr.DetectedDB != "" {
+			item.DetectedDBs = []string{ctr.DetectedDB}
+		}
+
+		direct := pickPreferredSchedule(containerSchedules[ctr.ID], containerSchedules[ctr.Name])
+		if direct != nil {
+			applyScheduleMatch(&item, direct, "", nextRunFn)
+		} else if ctr.ComposeProject != "" {
+			if stackSched := stackSchedules[ctr.ComposeProject]; stackSched != nil {
+				applyScheduleMatch(&item, stackSched, ctr.ComposeProject, nextRunFn)
+			}
+		}
+
+		summary.Containers = append(summary.Containers, item)
+		if !ctr.Excluded && !ctr.IsSelf {
+			summary.ContainersTotal++
+			if item.Scheduled {
+				summary.ContainersScheduled++
+			}
+		}
+	}
+
+	return summary
 }

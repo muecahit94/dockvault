@@ -23,7 +23,7 @@ import {
   Trash2,
   XCircle,
 } from 'lucide-react'
-import { api, formatBytes, formatDateTime, formatDuration } from '../api/client'
+import { api, formatBytes, formatDateTime, formatDuration, formatRelativeTime } from '../api/client'
 import { JobStepsList } from '../components/LiveProgressDrawer'
 import { Badge, Button, Card, EmptyState, Input, Label, Modal, Select, Switch } from '../components/ui'
 
@@ -62,7 +62,15 @@ function parseJSONList(raw) {
   }
 }
 
-export function History({ backups, loading, onRefresh, notify }) {
+export function History({
+  backups,
+  restores = [],
+  activeRollbacks = [],
+  loading,
+  onRefresh,
+  notify,
+}) {
+  const [viewTab, setViewTab] = useState('backups')
   const [statusFilter, setStatusFilter] = useState('')
   const [search, setSearch] = useState('')
 
@@ -91,6 +99,41 @@ export function History({ backups, loading, onRefresh, notify }) {
 
   const [compareData, setCompareData] = useState(null)
   const [compareLoading, setCompareLoading] = useState(false)
+
+  const activeRollbackByBackupId = useMemo(() => {
+    const map = new Map()
+    for (const r of activeRollbacks) {
+      map.set(r.backupLogId, r)
+    }
+    return map
+  }, [activeRollbacks])
+
+  const restoresByBackupId = useMemo(() => {
+    const map = new Map()
+    for (const r of restores) {
+      const existing = map.get(r.backupLogId)
+      if (!existing) {
+        map.set(r.backupLogId, { count: 1, latest: r })
+      } else {
+        existing.count += 1
+      }
+    }
+    return map
+  }, [restores])
+
+  const filteredRestores = useMemo(() => {
+    const q = search.trim().toLowerCase()
+    return restores.filter((r) => {
+      if (statusFilter && r.status !== statusFilter) return false
+      if (!q) return true
+      return (
+        r.targetName.toLowerCase().includes(q) ||
+        (r.backupFileName || '').toLowerCase().includes(q) ||
+        (r.targetVolume || '').toLowerCase().includes(q) ||
+        String(r.backupLogId).includes(q)
+      )
+    })
+  }, [restores, statusFilter, search])
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase()
@@ -333,6 +376,7 @@ export function History({ backups, loading, onRefresh, notify }) {
       onRefresh()
     } catch (err) {
       notify('error', `Restore failed: ${err.message}`)
+      onRefresh()
     } finally {
       setRestoring(false)
     }
@@ -343,6 +387,26 @@ export function History({ backups, loading, onRefresh, notify }) {
       <Card className="p-4">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div className="flex flex-wrap items-center gap-3">
+            <div className="flex items-center rounded-lg border border-zinc-800 bg-zinc-950 p-0.5 text-xs">
+              {[
+                { id: 'backups', label: `Archives (${filtered.length})` },
+                { id: 'restores', label: `Restore Log (${filteredRestores.length})` },
+              ].map((tab) => (
+                <button
+                  key={tab.id}
+                  type="button"
+                  onClick={() => setViewTab(tab.id)}
+                  className={`rounded-md px-2.5 py-1 font-medium transition-colors cursor-pointer ${
+                    viewTab === tab.id
+                      ? 'bg-zinc-800 text-zinc-100'
+                      : 'text-zinc-400 hover:text-zinc-200'
+                  }`}
+                >
+                  {tab.label}
+                </button>
+              ))}
+            </div>
+
             <div className="relative w-64">
               <Search className="pointer-events-none absolute left-3 top-2.5 h-4 w-4 text-zinc-500" />
               <Input
@@ -363,6 +427,13 @@ export function History({ backups, loading, onRefresh, notify }) {
               <option value="running">Running</option>
               <option value="failed">Failed</option>
             </Select>
+
+            {activeRollbacks.length > 0 && (
+              <Badge variant="info">
+                <RotateCcw className="h-3 w-3" />
+                {activeRollbacks.length} rolled-back target{activeRollbacks.length === 1 ? '' : 's'}
+              </Badge>
+            )}
           </div>
 
           <Button variant="outline" size="sm" onClick={onRefresh} disabled={loading}>
@@ -371,6 +442,100 @@ export function History({ backups, loading, onRefresh, notify }) {
           </Button>
         </div>
       </Card>
+
+      {viewTab === 'restores' ? (
+        filteredRestores.length === 0 ? (
+          <EmptyState
+            icon={RotateCcw}
+            title="No restore operations recorded"
+            description="Restoring an archive records the target, backup version restored, and rollback state here."
+          />
+        ) : (
+          <Card className="overflow-hidden">
+            <div className="overflow-x-auto">
+              <table className="w-full text-left text-sm">
+                <thead className="border-b border-zinc-800 bg-zinc-950/70 text-xs uppercase tracking-wider text-zinc-400">
+                  <tr>
+                    <th className="px-4 py-3 font-medium">Target</th>
+                    <th className="px-4 py-3 font-medium">Restored Version</th>
+                    <th className="px-4 py-3 font-medium">Mode &amp; Safety</th>
+                    <th className="px-4 py-3 font-medium">Status</th>
+                    <th className="px-4 py-3 font-medium">Restored At</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-zinc-800/70">
+                  {filteredRestores.map((r) => {
+                    const isCurrentRollback =
+                      r.status === 'success' &&
+                      r.mode === 'inplace' &&
+                      activeRollbacks.some((a) => a.id === r.id)
+                    return (
+                      <tr
+                        key={r.id}
+                        className={isCurrentRollback ? 'bg-sky-500/5' : 'hover:bg-zinc-900/50'}
+                      >
+                        <td className="px-4 py-3.5 align-top">
+                          <div className="flex items-center gap-2">
+                            <span className="font-medium text-zinc-100">{r.targetName}</span>
+                            <Badge variant="neutral">{r.targetType}</Badge>
+                          </div>
+                          <div className="mt-0.5 text-xs text-zinc-500">
+                            {r.restoredMounts} mount{r.restoredMounts === 1 ? '' : 's'}
+                            {r.restoredPaths > 0 ? ` · ${r.restoredPaths} selected path(s)` : ''}
+                          </div>
+                        </td>
+                        <td className="px-4 py-3.5 align-top">
+                          <div className="flex flex-wrap items-center gap-1.5 font-mono text-xs text-zinc-200">
+                            <span className="text-sky-400">#{r.backupLogId}</span>
+                            <span>{r.backupFileName || 'archive'}</span>
+                            {isCurrentRollback && (
+                              <Badge variant="info" className="font-sans">
+                                <RotateCcw className="h-2.5 w-2.5" />
+                                Current version
+                              </Badge>
+                            )}
+                          </div>
+                          <div className="mt-0.5 text-xs text-zinc-400">
+                            Backup from {formatDateTime(r.backupStartedAt)}
+                            {r.backupNote ? ` · ${r.backupNote}` : ''}
+                          </div>
+                        </td>
+                        <td className="px-4 py-3.5 align-top">
+                          <div className="flex flex-wrap items-center gap-1.5">
+                            {r.mode === 'staging' ? (
+                              <Badge variant="neutral">Staging → {r.targetVolume}</Badge>
+                            ) : (
+                              <Badge variant="info">In-place rollback</Badge>
+                            )}
+                            {r.preRestoreBackupId && (
+                              <Badge variant="neutral">Safety #{r.preRestoreBackupId}</Badge>
+                            )}
+                          </div>
+                        </td>
+                        <td className="px-4 py-3.5 align-top">
+                          <StatusBadge status={r.status} />
+                          {r.errorMessage && (
+                            <p className="mt-1 max-w-xs text-xs text-rose-400 break-words">
+                              {r.errorMessage}
+                            </p>
+                          )}
+                        </td>
+                        <td className="px-4 py-3.5 align-top">
+                          <div className="text-xs text-zinc-200">{formatDateTime(r.restoredAt)}</div>
+                          <div className="mt-0.5 text-xs text-zinc-500">
+                            {formatDuration(r.durationMs)}
+                          </div>
+                        </td>
+                      </tr>
+                    )
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </Card>
+        )
+      ) : (
+        <>
 
       {visibleSelected.length > 0 && (
         <Card className="p-3">
@@ -443,10 +608,19 @@ export function History({ backups, loading, onRefresh, notify }) {
                 </tr>
               </thead>
               <tbody className="divide-y divide-zinc-800/70">
-                {filtered.map((b) => (
+                {filtered.map((b) => {
+                  const activeRollback = activeRollbackByBackupId.get(b.id)
+                  const restoreMeta = restoresByBackupId.get(b.id)
+                  return (
                   <tr
                     key={b.id}
-                    className={visibleSelected.includes(b.id) ? 'bg-zinc-900/60' : 'hover:bg-zinc-900/50'}
+                    className={
+                      visibleSelected.includes(b.id)
+                        ? 'bg-zinc-900/60'
+                        : activeRollback
+                          ? 'bg-sky-500/5 hover:bg-sky-500/10'
+                          : 'hover:bg-zinc-900/50'
+                    }
                   >
                     <td className="w-10 pl-4 py-3.5 align-top">
                       <input
@@ -460,6 +634,7 @@ export function History({ backups, loading, onRefresh, notify }) {
                     </td>
                     <td className="px-4 py-3.5 align-top">
                       <div className="flex items-center gap-2">
+                        <span className="font-mono text-xs text-zinc-500">#{b.id}</span>
                         <span className="font-medium text-zinc-100">{b.targetName}</span>
                         <Badge variant="neutral">{b.targetType}</Badge>
                       </div>
@@ -480,7 +655,32 @@ export function History({ backups, loading, onRefresh, notify }) {
                     </td>
 
                     <td className="px-4 py-3.5 align-top">
-                      <StatusBadge status={b.status} />
+                      <div className="flex flex-col items-start gap-1">
+                        <StatusBadge status={b.status} />
+                        {activeRollback ? (
+                          <Badge
+                            variant="info"
+                            title={`Rolled back to this backup on ${formatDateTime(activeRollback.restoredAt)}`}
+                          >
+                            <RotateCcw className="h-3 w-3" />
+                            Rolled back to (Current · {formatRelativeTime(activeRollback.restoredAt)})
+                          </Badge>
+                        ) : (
+                          restoreMeta && (
+                            <Badge
+                              variant={restoreMeta.latest.status === 'failed' ? 'danger' : 'neutral'}
+                              title={`Restored ${restoreMeta.count} time(s), last on ${formatDateTime(restoreMeta.latest.restoredAt)}`}
+                            >
+                              <RotateCcw className="h-3 w-3" />
+                              {restoreMeta.latest.mode === 'staging'
+                                ? `Staged → ${restoreMeta.latest.targetVolume}`
+                                : restoreMeta.latest.status === 'failed'
+                                  ? 'Restore failed'
+                                  : `Restored${restoreMeta.count > 1 ? ` ×${restoreMeta.count}` : ''} · ${formatRelativeTime(restoreMeta.latest.restoredAt)}`}
+                            </Badge>
+                          )
+                        )}
+                      </div>
                       {b.errorMessage && (
                         <p className="mt-1 max-w-xs text-xs text-rose-400 break-words">
                           {b.errorMessage}
@@ -616,11 +816,13 @@ export function History({ backups, loading, onRefresh, notify }) {
                       </div>
                     </td>
                   </tr>
-                ))}
+                );})}
               </tbody>
             </table>
           </div>
         </Card>
+      )}
+        </>
       )}
 
       {/* Inspect / Details Modal */}

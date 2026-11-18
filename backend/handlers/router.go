@@ -70,6 +70,7 @@ func NewApp(cfg *config.Config, db *gorm.DB, dockerSvc *docker.Service, schedMgr
 	protected.Delete("/volumes/:name", s.DeleteVolume)
 
 	protected.Get("/backups", s.ListBackups)
+	protected.Get("/restores", s.ListRestores)
 	protected.Get("/backups/events", s.StreamBackupEvents)
 	protected.Post("/backups/run", s.RunBackup)
 	protected.Post("/backups/bulk", s.BulkBackupAction)

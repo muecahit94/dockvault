@@ -1,8 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   Activity,
-  Bell,
-  BellOff,
   CalendarClock,
   Container,
   History as HistoryIcon,
@@ -18,7 +16,6 @@ import {
   formatBytes,
   setTimeFormatPreference,
   setUnauthorizedHandler,
-  summarizeNotificationsList,
 } from './api/client'
 import { BackupModal } from './components/BackupModal'
 import { LiveProgressDrawer } from './components/LiveProgressDrawer'
@@ -89,6 +86,8 @@ export default function App() {
   const [volumes, setVolumes] = useState([])
   const [schedules, setSchedules] = useState([])
   const [backups, setBackups] = useState([])
+  const [restores, setRestores] = useState([])
+  const [activeRollbacks, setActiveRollbacks] = useState([])
   const [providers, setProviders] = useState([])
   const [notifications, setNotifications] = useState([])
 
@@ -168,6 +167,8 @@ export default function App() {
         setDashboard(dashRes)
         setSchedules(schedRes.schedules || [])
         setBackups(backupRes.backups || [])
+        setRestores(backupRes.restores || [])
+        setActiveRollbacks(backupRes.activeRollbacks || [])
         setProviders(storageRes.providers || [])
         if (prefRes?.preferences) {
           applyPreferences(prefRes.preferences, !initializedPrefsRef.current)
@@ -339,7 +340,6 @@ export default function App() {
   }
 
   const dockerConnected = dashboard?.docker?.connected
-  const notifOverview = summarizeNotificationsList(notifications)
 
   function navigateTo(nextPage, section) {
     if (nextPage === 'settings' && section) {
@@ -421,45 +421,6 @@ export default function App() {
               />
               {dockerConnected ? 'Docker Online' : 'Docker Offline'}
             </Badge>
-            <button
-              type="button"
-              onClick={() => navigateTo('settings', 'notifications')}
-              title={
-                notifOverview.activeCount > 0
-                  ? `Active alert channels (${notifOverview.activeCount}): ${notifOverview.activeChannels
-                      .map((c) => `${c.displayName} (${c.summary.targetSummary})`)
-                      .join(', ')}`
-                  : notifOverview.configuredCount > 0
-                    ? `${notifOverview.configuredCount} alert channel(s) configured (all paused)`
-                    : 'No alert channels configured — click to add one'
-              }
-              className="cursor-pointer transition-opacity hover:opacity-85"
-            >
-              <Badge
-                variant={
-                  notifOverview.activeCount > 0
-                    ? 'success'
-                    : notifOverview.configuredCount > 0
-                      ? 'warning'
-                      : 'neutral'
-                }
-              >
-                {notifOverview.activeCount > 0 ? (
-                  <Bell className="h-3 w-3" />
-                ) : (
-                  <BellOff className="h-3 w-3" />
-                )}
-                <span className="hidden md:inline">
-                  {notifOverview.activeCount === 1
-                    ? `Alerts: ${notifOverview.firstActive.displayName}`
-                    : notifOverview.activeCount > 1
-                      ? `Alerts: ${notifOverview.activeCount} Active`
-                      : notifOverview.configuredCount > 0
-                        ? `Alerts Paused (${notifOverview.configuredCount})`
-                        : 'Alerts Off'}
-                </span>
-              </Badge>
-            </button>
             {authStatus.enabled && authStatus.username && (
               <Badge variant="neutral">
                 <User className="h-3 w-3" />
@@ -533,14 +494,15 @@ export default function App() {
             containers={containers}
             stacks={stacks}
             volumes={volumes}
+            schedules={schedules}
             loading={loading}
             defaultTab={preferences.defaultResourceTab}
             includeStopped={includeStopped}
             onToggleIncludeStopped={setIncludeStopped}
             onRefresh={() => loadAll()}
             onOpenBackup={(target) => setBackupTarget(target)}
-            onOpenSchedule={(target) =>
-              setScheduleModal({ open: true, initialTarget: target, existing: null })
+            onOpenSchedule={(target, existing = null) =>
+              setScheduleModal({ open: true, initialTarget: target, existing })
             }
             notify={notify}
           />
@@ -562,6 +524,8 @@ export default function App() {
         {page === 'history' && (
           <History
             backups={backups}
+            restores={restores}
+            activeRollbacks={activeRollbacks}
             loading={loading}
             onRefresh={() => loadAll()}
             notify={notify}

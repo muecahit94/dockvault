@@ -63,10 +63,25 @@ type ContainerInfo struct {
 	ComposeService     string      `json:"composeService"`
 	ComposeConfigFiles string      `json:"composeConfigFiles"`
 	ComposeWorkingDir  string      `json:"composeWorkingDir"`
-	Mounts             []MountInfo `json:"mounts"`
-	BackupableCount    int         `json:"backupableCount"`
-	LastBackupAt       *time.Time  `json:"lastBackupAt,omitempty"`
-	LastBackupStatus   string      `json:"lastBackupStatus,omitempty"`
+	Mounts             []MountInfo     `json:"mounts"`
+	BackupableCount    int             `json:"backupableCount"`
+	LastBackupAt       *time.Time      `json:"lastBackupAt,omitempty"`
+	LastBackupStatus   string          `json:"lastBackupStatus,omitempty"`
+	LastRestore        *RestoreSummary `json:"lastRestore,omitempty"`
+}
+
+// RestoreSummary describes the latest restore / rollback event associated with a target.
+type RestoreSummary struct {
+	RestoreID        uint      `json:"restoreId"`
+	BackupLogID      uint      `json:"backupLogId"`
+	BackupFileName   string    `json:"backupFileName"`
+	BackupStartedAt  time.Time `json:"backupStartedAt"`
+	Mode             string    `json:"mode"`
+	TargetVolume     string    `json:"targetVolume,omitempty"`
+	RestoredPaths    int       `json:"restoredPaths,omitempty"`
+	Status           string    `json:"status"`
+	RestoredAt       time.Time `json:"restoredAt"`
+	IsActiveRollback bool      `json:"isActiveRollback"`
 }
 
 // ComposeStackInfo groups containers belonging to the same Docker Compose project.
@@ -87,6 +102,7 @@ type ComposeStackInfo struct {
 	GitOpsDBHotDump    *bool           `json:"gitopsDbHotDump,omitempty"`
 	LastBackupAt       *time.Time      `json:"lastBackupAt,omitempty"`
 	LastBackupStatus   string          `json:"lastBackupStatus,omitempty"`
+	LastRestore        *RestoreSummary `json:"lastRestore,omitempty"`
 }
 
 // DaemonStatus summarizes connectivity to the local Docker socket.

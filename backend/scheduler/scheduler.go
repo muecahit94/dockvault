@@ -126,33 +126,40 @@ func (m *Manager) runSchedule(scheduleID uint) {
 	defer cancel()
 
 	sid := sched.ID
-	_, err := m.dockerSvc.ExecuteBackup(ctx, docker.BackupRequest{
-		TargetType:         sched.TargetType,
-		TargetID:           sched.TargetID,
-		StorageProviderID:  sched.StorageProviderID,
-		SecondaryStorageID: sched.SecondaryStorageID,
-		PauseContainer:     sched.PauseContainer,
-		PreCommand:         sched.PreCommand,
-		PostCommand:        sched.PostCommand,
-		ExcludePatterns:    docker.ParseExcludePatterns(sched.ExcludePatterns),
-		Compression:        sched.Compression,
-		DBHotDump:          sched.DBHotDump,
-		Trigger:            "scheduled",
-		ScheduleID:         &sid,
-		RetentionPolicy:    sched.RetentionPolicy,
-		RetentionCount:     sched.RetentionCount,
-		KeepDaily:          sched.KeepDaily,
-		KeepWeekly:         sched.KeepWeekly,
-		KeepMonthly:        sched.KeepMonthly,
-	})
+	targets := sched.ResolvedTargets()
+	var firstErr error
+	for _, tgt := range targets {
+		_, err := m.dockerSvc.ExecuteBackup(ctx, docker.BackupRequest{
+			TargetType:         tgt.TargetType,
+			TargetID:           tgt.TargetID,
+			StorageProviderID:  sched.StorageProviderID,
+			SecondaryStorageID: sched.SecondaryStorageID,
+			PauseContainer:     sched.PauseContainer,
+			PreCommand:         sched.PreCommand,
+			PostCommand:        sched.PostCommand,
+			ExcludePatterns:    docker.ParseExcludePatterns(sched.ExcludePatterns),
+			Compression:        sched.Compression,
+			DBHotDump:          sched.DBHotDump,
+			Trigger:            "scheduled",
+			ScheduleID:         &sid,
+			RetentionPolicy:    sched.RetentionPolicy,
+			RetentionCount:     sched.RetentionCount,
+			KeepDaily:          sched.KeepDaily,
+			KeepWeekly:         sched.KeepWeekly,
+			KeepMonthly:        sched.KeepMonthly,
+		})
+		if err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
 
 	now := time.Now().UTC()
 	status := "success"
-	if err != nil {
+	if firstErr != nil {
 		status = "failed"
-		log.Printf("dockvault: scheduled backup %q (id=%d) failed: %v", sched.Name, sched.ID, err)
+		log.Printf("dockvault: scheduled backup %q (id=%d) failed: %v", sched.Name, sched.ID, firstErr)
 	} else {
-		log.Printf("dockvault: scheduled backup %q (id=%d) completed", sched.Name, sched.ID)
+		log.Printf("dockvault: scheduled backup %q (id=%d) completed (%d target(s))", sched.Name, sched.ID, len(targets))
 	}
 
 	m.db.Model(&models.BackupSchedule{}).Where("id = ?", sched.ID).Updates(map[string]any{

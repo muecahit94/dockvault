@@ -6,7 +6,7 @@
 
 **Self-hosted Docker Volume & Compose Backup Vault**
 
-Automatically discover running containers, Compose stacks, and named volumes—back them up safely with optional AES-256-GCM encryption, replicate to S3 or Azure Blob Storage, verify archive integrity, and restore with one click.
+Automatically discover running containers, Compose stacks, and named volumes—back them up safely with optional AES-256-GCM encryption, store or replicate across Local, S3, Azure Blob, SSH/SFTP, SMB, and NFS destinations, verify integrity, and track restores with one click.
 
 <p>
   <a href="https://github.com/muecahit94/dockvault/actions/workflows/release-please-docker-build.yml">
@@ -47,33 +47,34 @@ Instead of configuring every service manually, DockVault inspects your Docker En
 ## Features
 
 ### Discovery & Safe Archiving
-- **Automatic Docker & Compose Discovery** — Detects running and stopped containers, groups Compose stacks (`com.docker.compose.project`), lists all attached mounts, and surfaces unattached **orphan volumes** so nothing gets forgotten or can be cleaned up safely.
-- **Pause-Consistent Snapshots** — Temporarily pauses target container(s) while a lightweight helper container (`alpine:3.21`) streams volume contents into `.tar.gz`, then unpauses immediately (configurable per backup or globally in Settings).
-- **Pre/Post Exec Hooks** — Run commands inside containers before and after archiving (e.g., `pg_dumpall`, `sqlite3 .backup`, cache flushes) via modal overrides or container labels.
-- **Selective Mount Backups** — Pick specific volumes or bind mounts when backing up a multi-volume container or stack.
+- **Automatic Docker & Compose Discovery** — Detects running and stopped containers, groups Compose stacks (`com.docker.compose.project`), surfaces unattached **orphan volumes**, and displays configured schedules and active rollback versions directly on stacks and containers.
+- **Zero-Downtime DB Hot Dumps** — Auto-detects `postgres`, `mysql`, `mariadb`, `mongodb`, and `redis` and appends consistent dumps into `db_dumps/` inside the archive without pausing DB containers.
+- **Pause-Consistent Snapshots & Exclude Patterns** — Temporarily pauses target container(s) while a lightweight helper container (`alpine:3.21`) streams volume contents into `.tar.gz` or `.tar.zst`, skipping `.gitignore`-style exclude globs, then unpauses immediately.
+- **Pre/Post Exec Hooks & Selective Mounts** — Run custom commands inside containers before and after archiving via modal overrides or labels, and pick specific volumes or bind mounts per backup.
 
 ### Storage Destinations & 3-2-1 Replication
-- **Local Disk** — Store archives directly on host volumes or mounted NAS shares (`/app/backups`).
+- **Local Disk** — Store archives directly on host volumes or mounted paths (`/app/backups`).
 - **S3-Compatible Object Storage** — Connect AWS S3, MinIO, Cloudflare R2, Backblaze B2, Wasabi, and other S3 APIs with custom endpoints, path prefixing, and SSL control.
 - **Azure Blob Storage** — Supports **Account Key**, **Service Principal (Entra ID App Registration)**, **Connection String**, and **SAS Token** authentication, selectable access tiers (`Hot`, `Cool`, `Cold`, `Archive`), automatic container creation, and 1-hour pre-signed SAS download URLs.
-- **3-2-1 Offsite Replication** — Configure any manual backup or scheduled job to replicate a second copy to an offsite destination automatically.
-- **Disaster Recovery Scan & Import** — Rebuilding a server? Connect any existing Local, S3, or Azure destination and click **Scan & Import** to index prior backups back into History for inspection and restore.
+- **SSH / SFTP** — Transfer archives to any SSH/NAS target (or Hetzner Storage Box) using a password, pasted PEM/OpenSSH private key, or a **local container SSH key** mounted into `/root/.ssh` (auto-discovered or explicit path, optional passphrase).
+- **SMB / CIFS & NFS (User-Space)** — Connect directly to Samba/TrueNAS/Synology **SMB** shares or **NFSv3** exports (`AUTH_UNIX` UID/GID configurable) in pure Go without host mounts, root privileges, or `CAP_SYS_ADMIN`.
+- **3-2-1 Offsite Replication & Scan Import** — Automatically replicate any manual or scheduled backup to a secondary offsite destination, and use **Scan & Import** across any destination when rebuilding a host.
 
-### Encryption, Inspection & Restore
-- **Client-Side Encryption (AES-256-GCM)** — Enable encryption per storage destination to encrypt archives locally into `.tar.gz.enc` (scrypt key derivation + chunked AES-256-GCM) before uploading; transparently decrypted on **Inspect**, **Download**, **Verify**, and **Restore** (raw `.enc` downloads remain available via `?raw=true`).
-- **Archive Tree Inspector & Single-File Extract** — Browse files inside `.tar.gz` and `.tar.gz.enc` backups directly in the browser and extract a single config or database file without downloading the whole archive.
-- **SHA-256 Integrity Verification** — Every backup records a SHA-256 digest and can be verified against stored data on demand.
-- **One-Click & Selective Restore** — Restore entire volume trees back into their target mounts (or a staging volume) with optional container pausing, or tick individual files/folders in the archive inspector to restore only those paths.
-- **Backup Notes & Snapshot Compare** — Annotate backups (e.g. "before postgres 17 upgrade") when running them or later in History, and diff any two snapshots to see added, removed, and changed files.
-- **Bulk History Actions** — Multi-select backups to pin, unpin, verify, or delete them in one go.
+### Encryption, Inspection & Restore Tracking
+- **Client-Side Encryption (AES-256-GCM)** — Enable encryption per storage destination to encrypt archives locally into `.tar.gz.enc` / `.tar.zst.enc` (scrypt key derivation + chunked AES-256-GCM) before upload; transparently decrypted on **Inspect**, **Download**, **Verify**, and **Restore** (raw `.enc` downloads remain available via `?raw=true`).
+- **Archive Tree Inspector & Single-File Extract** — Browse files inside backups directly in the browser and extract a single config or database file without downloading the whole archive.
+- **SHA-256 Integrity Verification & Compare** — Every backup records a SHA-256 digest for on-demand verification, and any two snapshots in History can be diffed for added, removed, and changed files.
+- **Safer One-Click & Selective Restore** — Restore entire mounts in place or into an isolated **Staging Volume**, optionally taking an automatic **Pre-Restore Safety Snapshot** before overwriting data, or restore only ticked paths.
+- **Restore & Rollback Visibility** — Every restore is persisted in **History → Restore Log**, with **Current version / Rolled back** badges across Dashboard, History, and Containers & Volumes so you always know which backup snapshot a target rolled back to.
+- **Notes & Bulk History Actions** — Annotate backups (e.g. "before postgres 17 upgrade") and multi-select backups to pin, unpin, verify, compare, or delete them in bulk.
 
 ### Scheduling, Retention & Multi-Channel Alerts
-- **Cron Scheduler with Live Preview** — Built-in cron presets, timezone awareness (`TZ`), one-click **Run Now**, and next-run previews before saving.
+- **Multi-Target Cron Scheduler** — Activate multiple Compose stacks, containers, and/or volumes in a single cron schedule (or create individual schedules) with live **Next Run** previews, timezone support (`TZ`), 24-hour collision timeline, and one-click **Run Now**.
 - **Keep-N & GFS Retention + Pinning** — Automatically prune old snapshots by count (`Keep Latest N`) or **Grandfather-Father-Son (Daily / Weekly / Monthly)** rules, and **Pin** critical backups so they are never pruned.
-- **Reusable Schedules** — Duplicate a schedule or apply its full policy (cron, storage, retention, hooks, alerts) to many stacks, containers, or volumes at once.
+- **Reusable Policies & GitOps Labels** — Duplicate schedules, apply policies across targets, or declare schedules and hooks via Docker labels.
 - **Overdue Backup Alerts** — Set a per-schedule alert window (e.g. 26h for a daily job) to get notified when backups silently stop succeeding, not just when they fail.
-- **Resilient Cloud Uploads** — S3 and Azure transfers automatically retry transient failures (throttling, 5xx, dropped connections) with backoff.
-- **Multiple Notification Channels** — Configure and independently enable/disable multiple **Telegram Bot** (with optional topic/thread IDs), **Discord**, **Slack**, **ntfy**, or **Generic JSON Webhook** channels, with per-channel failure/success triggers and one-click test alerts, plus optional browser desktop notifications and a live tab-title status for backups finishing in the background.
+- **Resilient Transfers** — S3 and Azure uploads/downloads automatically retry transient failures with backoff, and live backup progress streams over SSE.
+- **Multiple Notification Channels** — Configure and independently enable/disable multiple **Telegram Bot** (with optional topic/thread IDs), **Discord**, **Slack**, **ntfy**, or **Generic JSON Webhook** channels, with per-channel failure/success triggers, one-click test alerts, and optional browser desktop notifications.
 
 ### Security & Customizable Workspace
 - **Built-in Auth & Reverse Proxy SSO** — Protect the UI with local username/password authentication (`bcrypt` + signed `HttpOnly` cookies) or delegate auth to a reverse proxy header (e.g., `Remote-User` from Authelia, Authentik, or Traefik ForwardAuth). Failed logins are rate-limited (10 per 15 minutes per client IP and username; set `DOCKVAULT_TRUSTED_PROXIES` behind a reverse proxy).
@@ -106,6 +107,8 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock # Discover containers & stream volumes
       - ./data:/app/data                          # SQLite database & settings
       - ./backups:/app/backups                    # Local backup destination
+      # Optional: mount host SSH keys to use container-local key auth for SSH/SFTP destinations
+      # - ~/.ssh:/root/.ssh:ro
 ```
 
 Start the container and open **`http://localhost:8080`**:
@@ -120,19 +123,19 @@ docker compose up -d
 
 1. **Add Storage Destinations (`Settings → Storage`)**
    - A **Local Storage** destination (`/app/backups`) is ready out of the box.
-   - Click **Add Storage Provider** to add S3/MinIO or Azure Blob Storage, test connectivity, and optionally enable **Client-Side Encryption (AES-256-GCM)**.
+   - Click **Add Storage Provider** to add **S3/MinIO**, **Azure Blob Storage**, **SSH/SFTP** (password, pasted key, or mounted container SSH key), **SMB/CIFS**, or **NFSv3**, test connectivity, and optionally enable **Client-Side Encryption (AES-256-GCM)**.
 2. **Run a Manual Backup (`Containers & Volumes`)**
-   - Switch between **Compose Stacks**, **Containers**, and **Volumes** (including unattached orphan volumes).
-   - Click **Backup** on any stack, container, or volume to choose mounts, primary + 3-2-1 secondary storage, pause behavior, and pre/post hooks.
+   - Switch between **Compose Stacks**, **Containers**, and **Volumes** (including configured schedules and active rollback badges right on each target).
+   - Click **Run Backup** on any stack, container, or volume to choose mounts, `gzip`/`zstd`, primary + 3-2-1 secondary storage, pause behavior, DB hot dumps, and pre/post hooks.
 3. **Automate with Schedules (`Schedules`)**
-   - Create cron jobs with Keep-N or GFS retention rules and inspect the **Next Run** preview right in the modal.
+   - Create cron jobs covering one or multiple activated stacks, containers, and volumes with Keep-N or GFS retention rules and inspect the **Next Run** preview right in the modal.
    - Set **Alert if no successful backup within (hours)** to be warned about overdue schedules, and use **Duplicate** / **Apply to other targets** to reuse a policy.
 4. **Set Up Alerts (`Settings → Notifications`)**
    - Click **Add Channel** to configure one or more channels (Telegram Bot, Discord, Slack, ntfy, or webhook), toggle each channel active/paused independently, and send a **Test** alert.
 5. **Inspect, Verify & Restore (`History`)**
    - **Pin** important snapshots to protect them from retention pruning, add **notes**, or select several rows for bulk pin/verify/delete — select exactly two to **Compare** them.
-   - Click the eye icon (**Inspect**) to browse archive entries, extract individual files, or run **Verify SHA-256**, and click **Download** to save the `.tar.gz` archive (decrypted on the fly if encrypted).
-   - Click **Restore** to write an archive back to its target volumes.
+   - Click the eye icon (**Inspect**) to browse archive entries, extract individual files, or run **Verify SHA-256**, and click **Download** to save the archive (decrypted on the fly if encrypted).
+   - Click **Restore** to write an archive back to its target mounts (or a staging volume, with an optional pre-restore safety snapshot), and inspect the **Restore Log** tab and **Current version / Rolled back** indicators across Dashboard, History, and Containers.
 
 ---
 
@@ -194,7 +197,7 @@ services:
 
 - Access to `/var/run/docker.sock` grants control over the host Docker daemon. If DockVault is reachable beyond localhost, enable **Built-in Authentication** (under **Settings → Security & Auth** or via env vars) or place it behind an authenticated reverse proxy (Authelia, Authentik, Traefik ForwardAuth, or Tailscale) using `DOCKVAULT_TRUSTED_PROXY_HEADER`.
 - `/var/run/docker.sock` bind mounts are automatically excluded from all backup archives.
-- Storage secrets (S3 secret keys, Azure credentials, encryption passphrases) and Telegram bot tokens are stored in SQLite and never returned by API read endpoints.
+- Storage secrets (S3 secret keys, Azure credentials, SSH passwords/private keys, SMB passwords, and encryption passphrases) and Telegram bot tokens are stored in SQLite and never returned by API read endpoints.
 
 ---
 
@@ -222,7 +225,7 @@ npm run dev
 | Docker Engine | Official Docker Go SDK (`github.com/docker/docker/client`) |
 | Scheduler | `github.com/robfig/cron/v3` |
 | Encryption | Chunked AES-256-GCM + `scrypt` (`golang.org/x/crypto/scrypt`) |
-| Cloud Storage | `minio-go/v7` (S3), `azblob` + `azidentity` (Azure Blob & Entra ID) |
+| Cloud & Network Storage | `minio-go/v7` (S3), `azblob` + `azidentity` (Azure Blob & Entra ID), `pkg/sftp` (SSH/SFTP), `go-smb2` (SMB/CIFS), `go-nfs-client` (NFSv3) |
 | Frontend | React, Vite, Tailwind CSS (`v4`), Lucide Icons |
 | Packaging & CI | Multi-stage Alpine container (`linux/amd64` & `linux/arm64`), GitHub Actions, Release Please, Renovate |
 

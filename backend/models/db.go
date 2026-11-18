@@ -45,7 +45,7 @@ func InitDB(dataDir, defaultBackupDir string) (*gorm.DB, error) {
 		_, _ = sqlDB.Exec("PRAGMA busy_timeout=5000;")
 	}
 
-	if err := db.AutoMigrate(&User{}, &AppSetting{}, &StorageProvider{}, &BackupSchedule{}, &BackupLog{}, &NotificationConfig{}); err != nil {
+	if err := db.AutoMigrate(&User{}, &AppSetting{}, &StorageProvider{}, &BackupSchedule{}, &BackupLog{}, &RestoreLog{}, &NotificationConfig{}); err != nil {
 		return nil, fmt.Errorf("auto-migrate schema: %w", err)
 	}
 

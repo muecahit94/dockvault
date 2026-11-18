@@ -908,8 +908,334 @@ func TestDashboardAnalyticsZstdInspectAndScheduleOptions(t *testing.T) {
 	if resp.StatusCode != http.StatusOK ||
 		!bytes.Contains(raw, []byte(`"storageAnalytics"`)) ||
 		!bytes.Contains(raw, []byte(`"securityOverview"`)) ||
+		!bytes.Contains(raw, []byte(`"scheduleCoverage"`)) ||
 		!bytes.Contains(raw, []byte(`"zstd":1`)) {
 		t.Fatalf("dashboard analytics missing fields (%d): %s", resp.StatusCode, raw)
+	}
+}
+
+func TestBuildScheduleCoverage(t *testing.T) {
+	stacks := []docker.ComposeStackInfo{
+		{Name: "media-stack", RunningCount: 2, TotalCount: 2, BackupableCount: 3},
+		{Name: "homelab-unprotected", RunningCount: 1, TotalCount: 1, BackupableCount: 1},
+	}
+	containers := []docker.ContainerInfo{
+		{ID: "ctr-1", Name: "jellyfin", State: "running", ComposeProject: "media-stack", BackupableCount: 2},
+		{ID: "ctr-2", Name: "vaultwarden", State: "running", BackupableCount: 1, DetectedDB: "sqlite"},
+		{ID: "ctr-3", Name: "scratch-app", State: "running", BackupableCount: 1},
+		{ID: "ctr-self", Name: "dockvault", State: "running", IsSelf: true, BackupableCount: 1},
+		{ID: "ctr-excluded", Name: "ephemeral-cache", State: "running", Excluded: true, BackupableCount: 1},
+	}
+	next := time.Date(2026, 11, 19, 3, 0, 0, 0, time.UTC)
+	schedules := []models.BackupSchedule{
+		{ID: 10, Name: "Media Nightly", TargetType: "stack", TargetID: "media-stack", TargetName: "media-stack", CronExpr: "0 3 * * *", Enabled: true},
+		{ID: 11, Name: "Vaultwarden Paused", TargetType: "container", TargetID: "old-id", TargetName: "vaultwarden", CronExpr: "0 4 * * *", Enabled: false},
+	}
+
+	cov := buildScheduleCoverage(containers, stacks, schedules, restoreStateSummary{}, func(id uint) *time.Time {
+		if id == 10 {
+			return &next
+		}
+		return nil
+	})
+
+	if cov.StacksTotal != 2 || cov.StacksScheduled != 1 {
+		t.Fatalf("unexpected stack coverage counts: %+v", cov)
+	}
+	if cov.ContainersTotal != 3 || cov.ContainersScheduled != 2 {
+		t.Fatalf("unexpected container coverage counts: %+v", cov)
+	}
+	if !cov.Stacks[0].Scheduled || !cov.Stacks[0].Enabled || cov.Stacks[0].ScheduleName != "Media Nightly" || cov.Stacks[0].NextRunAt == nil {
+		t.Fatalf("expected active stack match, got %+v", cov.Stacks[0])
+	}
+	if cov.Stacks[1].Scheduled {
+		t.Fatalf("expected homelab-unprotected stack unscheduled, got %+v", cov.Stacks[1])
+	}
+	if !cov.Containers[0].Scheduled || !cov.Containers[0].Enabled || cov.Containers[0].ViaStack != "media-stack" {
+		t.Fatalf("expected jellyfin inherited stack schedule, got %+v", cov.Containers[0])
+	}
+	if !cov.Containers[1].Scheduled || cov.Containers[1].Enabled || cov.Containers[1].ScheduleID != 11 {
+		t.Fatalf("expected vaultwarden paused name-matched schedule, got %+v", cov.Containers[1])
+	}
+	if cov.Containers[2].Scheduled {
+		t.Fatalf("expected scratch-app unscheduled, got %+v", cov.Containers[2])
+	}
+}
+
+func TestRestoreStateTracking(t *testing.T) {
+	app, db, _, cleanup := setupTestApp(t)
+	defer cleanup()
+
+	var localProv models.StorageProvider
+	if err := db.Where("type = ?", "local").First(&localProv).Error; err != nil {
+		t.Fatalf("local provider: %v", err)
+	}
+
+	t0 := time.Now().UTC().Add(-2 * time.Hour)
+	t1 := t0.Add(30 * time.Minute)
+	tRestore := t1.Add(30 * time.Minute)
+
+	bOld := models.BackupLog{
+		Trigger:             "scheduled",
+		TargetType:          "stack",
+		TargetID:            "pg-stack",
+		TargetName:          "pg-stack",
+		StorageProviderID:   localProv.ID,
+		StorageProviderName: localProv.Name,
+		StorageType:         localProv.Type,
+		Status:              "success",
+		FileName:            "pg-stack-old.tar.gz",
+		StoragePath:         "/tmp/pg-stack-old.tar.gz",
+		StartedAt:           t0,
+	}
+	bNew := models.BackupLog{
+		Trigger:             "manual",
+		TargetType:          "stack",
+		TargetID:            "pg-stack",
+		TargetName:          "pg-stack",
+		StorageProviderID:   localProv.ID,
+		StorageProviderName: localProv.Name,
+		StorageType:         localProv.Type,
+		Status:              "success",
+		FileName:            "pg-stack-new.tar.gz",
+		StoragePath:         "/tmp/pg-stack-new.tar.gz",
+		StartedAt:           t1,
+	}
+	bPreSnap := models.BackupLog{
+		Trigger:             "pre-restore",
+		TargetType:          "stack",
+		TargetID:            "pg-stack",
+		TargetName:          "pg-stack",
+		StorageProviderID:   localProv.ID,
+		StorageProviderName: localProv.Name,
+		StorageType:         localProv.Type,
+		Status:              "success",
+		FileName:            "pg-stack-prerestore.tar.gz",
+		StoragePath:         "/tmp/pg-stack-prerestore.tar.gz",
+		StartedAt:           tRestore.Add(time.Second),
+	}
+	for _, entry := range []*models.BackupLog{&bOld, &bNew, &bPreSnap} {
+		if err := db.Create(entry).Error; err != nil {
+			t.Fatalf("create backup log: %v", err)
+		}
+	}
+
+	// Staging restore should not mark live stack as actively rolled back.
+	staged := models.RestoreLog{
+		BackupLogID:     bOld.ID,
+		BackupFileName:  bOld.FileName,
+		BackupStartedAt: bOld.StartedAt,
+		TargetType:      "stack",
+		TargetID:        "pg-stack",
+		TargetName:      "pg-stack",
+		Mode:            "staging",
+		TargetVolume:    "pg-staging",
+		Status:          "success",
+		RestoredAt:      tRestore.Add(-5 * time.Minute),
+	}
+	inplace := models.RestoreLog{
+		BackupLogID:        bOld.ID,
+		BackupFileName:     bOld.FileName,
+		BackupStartedAt:    bOld.StartedAt,
+		PreRestoreBackupID: &bPreSnap.ID,
+		TargetType:         "stack",
+		TargetID:           "pg-stack",
+		TargetName:         "pg-stack",
+		Mode:               "inplace",
+		RestoredMounts:     2,
+		Status:             "success",
+		RestoredAt:         tRestore,
+	}
+	for _, r := range []*models.RestoreLog{&staged, &inplace} {
+		if err := db.Create(r).Error; err != nil {
+			t.Fatalf("create restore log: %v", err)
+		}
+	}
+
+	state := computeRestoreState(db, 50)
+	if len(state.ActiveRollbacks) != 1 || state.ActiveRollbacks[0].BackupLogID != bOld.ID {
+		t.Fatalf("expected active rollback to bOld (#%d), got %+v", bOld.ID, state.ActiveRollbacks)
+	}
+	resolved := resolveTargetRestore("container", "postgres", "pg-stack", state)
+	if resolved == nil || !resolved.IsActiveRollback || resolved.BackupLogID != bOld.ID {
+		t.Fatalf("expected container to inherit stack active rollback to bOld, got %+v", resolved)
+	}
+
+	resp, raw := doJSON(t, app, http.MethodGet, "/api/restores", nil)
+	if resp.StatusCode != http.StatusOK ||
+		!bytes.Contains(raw, []byte(`"activeRollbacks"`)) ||
+		!bytes.Contains(raw, []byte(`"pg-stack-old.tar.gz"`)) {
+		t.Fatalf("GET /api/restores missing rollback details (%d): %s", resp.StatusCode, raw)
+	}
+
+	// Once a newer regular backup completes after the restore, the active rollback badge clears.
+	afterBackup := models.BackupLog{
+		Trigger:             "scheduled",
+		TargetType:          "stack",
+		TargetID:            "pg-stack",
+		TargetName:          "pg-stack",
+		StorageProviderID:   localProv.ID,
+		StorageProviderName: localProv.Name,
+		StorageType:         localProv.Type,
+		Status:              "success",
+		FileName:            "pg-stack-after.tar.gz",
+		StoragePath:         "/tmp/pg-stack-after.tar.gz",
+		StartedAt:           tRestore.Add(10 * time.Minute),
+	}
+	if err := db.Create(&afterBackup).Error; err != nil {
+		t.Fatalf("create post-restore backup: %v", err)
+	}
+	stateAfter := computeRestoreState(db, 50)
+	if len(stateAfter.ActiveRollbacks) != 0 {
+		t.Fatalf("expected active rollback to clear after newer backup, got %+v", stateAfter.ActiveRollbacks)
+	}
+	if len(stateAfter.Restores) != 2 {
+		t.Fatalf("expected historical restore logs preserved, got %d", len(stateAfter.Restores))
+	}
+}
+
+func TestMultiTargetScheduleCRUDAndCoverage(t *testing.T) {
+	app, db, _, cleanup := setupTestApp(t)
+	defer cleanup()
+
+	var localProv models.StorageProvider
+	if err := db.Where("type = ?", "local").First(&localProv).Error; err != nil {
+		t.Fatalf("local provider: %v", err)
+	}
+
+	resp, raw := doJSON(t, app, http.MethodPost, "/api/schedules", map[string]any{
+		"name":              "Homelab Nightly",
+		"cronExpr":          "0 2 * * *",
+		"storageProviderId": localProv.ID,
+		"targets": []map[string]string{
+			{"targetType": "stack", "targetId": "media-stack", "targetName": "media-stack"},
+			{"targetType": "stack", "targetId": "pg-stack", "targetName": "pg-stack"},
+			{"targetType": "container", "targetId": "vaultwarden", "targetName": "vaultwarden"},
+		},
+	})
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("create multi-target schedule failed (%d): %s", resp.StatusCode, raw)
+	}
+
+	var createEnvelope struct {
+		Schedule struct {
+			ID         uint                    `json:"id"`
+			TargetType string                  `json:"targetType"`
+			Targets    []models.ScheduleTarget `json:"targets"`
+		} `json:"schedule"`
+	}
+	if err := json.Unmarshal(raw, &createEnvelope); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	if createEnvelope.Schedule.TargetType != "multi" || len(createEnvelope.Schedule.Targets) != 3 {
+		t.Fatalf("expected multi-target schedule with 3 targets, got %+v", createEnvelope.Schedule)
+	}
+
+	// Verify buildScheduleCoverage recognizes all stacks & containers in the schedule.
+	var stored models.BackupSchedule
+	if err := db.First(&stored, createEnvelope.Schedule.ID).Error; err != nil {
+		t.Fatalf("load stored schedule: %v", err)
+	}
+	cov := buildScheduleCoverage(
+		[]docker.ContainerInfo{
+			{ID: "c1", Name: "vaultwarden", State: "running", BackupableCount: 1},
+		},
+		[]docker.ComposeStackInfo{
+			{Name: "media-stack", RunningCount: 1, TotalCount: 1, BackupableCount: 1},
+			{Name: "pg-stack", RunningCount: 1, TotalCount: 1, BackupableCount: 1},
+		},
+		[]models.BackupSchedule{stored},
+		restoreStateSummary{},
+		nil,
+	)
+	if cov.StacksScheduled != 2 || cov.ContainersScheduled != 1 {
+		t.Fatalf("expected all multi-target stacks & containers covered, got %+v", cov)
+	}
+
+	// Update targets to drop one stack cleanly.
+	resp, raw = doJSON(t, app, http.MethodPut, "/api/schedules/"+itoa(stored.ID), map[string]any{
+		"targets": []map[string]string{
+			{"targetType": "stack", "targetId": "media-stack", "targetName": "media-stack"},
+			{"targetType": "stack", "targetId": "homelab-db", "targetName": "homelab-db"},
+		},
+	})
+	if resp.StatusCode != http.StatusOK || !bytes.Contains(raw, []byte(`"homelab-db"`)) {
+		t.Fatalf("update multi-target schedule failed (%d): %s", resp.StatusCode, raw)
+	}
+}
+
+func TestSSHSMBNFSStorageProvidersSecretMasking(t *testing.T) {
+	app, db, _, cleanup := setupTestApp(t)
+	defer cleanup()
+
+	// Create SSH provider (password auth)
+	resp, raw := doJSON(t, app, http.MethodPost, "/api/storage", map[string]any{
+		"name":       "Hetzner StorageBox SSH",
+		"type":       "ssh",
+		"host":       "u12345.your-storagebox.de",
+		"port":       23,
+		"username":   "u12345",
+		"password":   "super-ssh-pass",
+		"remotePath": "/home/dockvault",
+	})
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("create ssh provider failed (%d): %s", resp.StatusCode, raw)
+	}
+	if bytes.Contains(raw, []byte("super-ssh-pass")) || !bytes.Contains(raw, []byte(`"hasPassword":true`)) {
+		t.Fatalf("SSH secret should be masked in DTO: %s", raw)
+	}
+
+	var sshRes struct {
+		Provider models.StorageProviderDTO `json:"provider"`
+	}
+	_ = json.Unmarshal(raw, &sshRes)
+
+	// Update SSH provider without resending password -> preserves existing password cleanly.
+	resp, raw = doJSON(t, app, http.MethodPut, "/api/storage/"+itoa(sshRes.Provider.ID), map[string]any{
+		"name":       "Hetzner StorageBox SFTP",
+		"type":       "ssh",
+		"host":       "u12345.your-storagebox.de",
+		"port":       23,
+		"username":   "u12345",
+		"remotePath": "/home/dockvault-v2",
+	})
+	if resp.StatusCode != http.StatusOK || !bytes.Contains(raw, []byte(`"hasPassword":true`)) {
+		t.Fatalf("update ssh provider failed (%d): %s", resp.StatusCode, raw)
+	}
+	var sshRow models.StorageProvider
+	_ = db.First(&sshRow, sshRes.Provider.ID)
+	if sshRow.Password != "super-ssh-pass" {
+		t.Fatalf("expected preserved SSH password, got %q", sshRow.Password)
+	}
+
+	// Create SMB provider
+	resp, raw = doJSON(t, app, http.MethodPost, "/api/storage", map[string]any{
+		"name":       "TrueNAS SMB",
+		"type":       "smb",
+		"host":       "192.168.1.50",
+		"port":       445,
+		"smbShare":   "backups",
+		"smbDomain":  "WORKGROUP",
+		"username":   "backup",
+		"password":   "smb-pass-secret",
+		"remotePath": "dockvault",
+	})
+	if resp.StatusCode != http.StatusCreated || bytes.Contains(raw, []byte("smb-pass-secret")) || !bytes.Contains(raw, []byte(`"hasPassword":true`)) {
+		t.Fatalf("create smb provider failed (%d): %s", resp.StatusCode, raw)
+	}
+
+	// Create NFS provider
+	resp, raw = doJSON(t, app, http.MethodPost, "/api/storage", map[string]any{
+		"name":       "Synology NFS",
+		"type":       "nfs",
+		"host":       "192.168.1.60",
+		"nfsExport":  "/volume1/backups",
+		"remotePath": "dockvault",
+		"nfsUid":     1000,
+		"nfsGid":     1000,
+	})
+	if resp.StatusCode != http.StatusCreated || !bytes.Contains(raw, []byte(`"nfsExport":"/volume1/backups"`)) {
+		t.Fatalf("create nfs provider failed (%d): %s", resp.StatusCode, raw)
 	}
 }
 
