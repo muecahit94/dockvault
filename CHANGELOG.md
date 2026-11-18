@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.5.0](https://github.com/muecahit94/dockvault/compare/v0.4.1...v0.5.0) (2026-11-18)
+
+
+### Features
+
+* add SSH/SMB/NFS backends, multi-target schedules, and rollback … ([5ebec10](https://github.com/muecahit94/dockvault/commit/5ebec1006085cbbe8ce3c7f8d7f435a7bc90e4df))
+* add SSH/SMB/NFS backends, multi-target schedules, and rollback tracking ([cc17ee4](https://github.com/muecahit94/dockvault/commit/cc17ee4258f825d4e621aae40a946863be436c7c))
+
 ## [0.4.1](https://github.com/muecahit94/dockvault/compare/v0.4.0...v0.4.1) (2026-11-18)
 
 
