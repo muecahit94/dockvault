@@ -9,6 +9,8 @@ PORT="${DOCKVAULT_E2E_PORT:-18088}"
 PREFIX="${DOCKVAULT_E2E_PREFIX:-dv-e2e-$$}"
 SKIP_BUILD="${DOCKVAULT_E2E_SKIP_BUILD:-0}"
 KEEP_IMAGE="${DOCKVAULT_E2E_KEEP_IMAGE:-0}"
+WITH_DB="${DOCKVAULT_E2E_WITH_DB:-0}"
+WITH_EDGE="${DOCKVAULT_E2E_WITH_EDGE:-0}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -28,12 +30,26 @@ while [[ $# -gt 0 ]]; do
       KEEP_IMAGE=1
       shift
       ;;
+    --with-db)
+      WITH_DB=1
+      shift
+      ;;
+    --with-edge)
+      WITH_EDGE=1
+      shift
+      ;;
+    --all)
+      WITH_DB=1
+      WITH_EDGE=1
+      shift
+      ;;
     -h|--help)
       cat <<EOF
-Usage: $(basename "$0") [--image TAG] [--port PORT] [--skip-build] [--keep-image]
+Usage: $(basename "$0") [--image TAG] [--port PORT] [--skip-build] [--keep-image] [--with-db] [--with-edge] [--all]
 
 Spins up an isolated DockVault container and live Docker fixture containers/volumes,
-runs tests/e2e/e2e_test.py (12 scenarios), and removes all temporary test resources on exit.
+runs tests/e2e/e2e_test.py (12 scenarios), optionally runs the database suite (--with-db)
+and edge/chaos/cloud suite (--with-edge, or --all for both), and removes all temporary test resources on exit.
 EOF
       exit 0
       ;;
@@ -44,12 +60,8 @@ EOF
   esac
 done
 
-for cmd in docker python3 curl; do
-  command -v "$cmd" >/dev/null 2>&1 || {
-    echo "Missing required command: $cmd" >&2
-    exit 1
-  }
-done
+source "$SCRIPT_DIR/common.sh"
+e2e_require_cmds docker python3 curl
 
 WORKDIR="$(mktemp -d 2>/dev/null || mktemp -d -t dockvault-e2e)"
 mkdir -p "$WORKDIR/data" "$WORKDIR/backups" "$WORKDIR/bind_data"
@@ -91,11 +103,10 @@ cleanup() {
 trap cleanup EXIT
 
 if [[ "$SKIP_BUILD" != "1" ]]; then
-  echo "Building $IMAGE_TAG from $REPO_ROOT..."
-  docker build -t "$IMAGE_TAG" "$REPO_ROOT" >/dev/null
+  e2e_build_image "$IMAGE_TAG" "$REPO_ROOT" "$WORKDIR/build.log"
 fi
 
-echo "Starting isolated fixture containers & volumes (prefix=$PREFIX, port=$PORT)..."
+printf "  ▶ Provisioning core fixtures (prefix=%s) ... " "$PREFIX"
 docker volume create "$APP_V" >/dev/null
 docker volume create "$ORPHAN_V" >/dev/null
 docker volume create "$DELETE_V" >/dev/null
@@ -181,22 +192,20 @@ docker run -d --name "$DOCKVAULT_C" \
   -v "${WORKDIR}/data:/app/data" \
   -v "${WORKDIR}/backups:/app/backups" \
   "$IMAGE_TAG" >/dev/null
+printf "ready\n"
 
-healthy=0
-for _ in $(seq 1 30); do
-  if curl -sf "http://127.0.0.1:${PORT}/api/health" >/dev/null; then
-    healthy=1
-    break
-  fi
-  sleep 0.5
-done
-if [[ "$healthy" != "1" ]]; then
-  echo "DockVault E2E container did not become healthy in time." >&2
-  exit 1
-fi
+e2e_wait_healthy "$PORT" "DockVault Core E2E"
 
 DOCKVAULT_E2E_URL="http://127.0.0.1:${PORT}/api" \
 DOCKVAULT_E2E_WEB_URL="http://127.0.0.1:${PORT}/" \
 DOCKVAULT_E2E_PREFIX="$PREFIX" \
 DOCKVAULT_E2E_BIND_DIR="${WORKDIR}/bind_data" \
   python3 "$SCRIPT_DIR/e2e_test.py"
+
+if [[ "$WITH_DB" == "1" ]]; then
+  "$SCRIPT_DIR/run_db_e2e.sh" --image "$IMAGE_TAG" --skip-build
+fi
+
+if [[ "$WITH_EDGE" == "1" ]]; then
+  "$SCRIPT_DIR/run_edge_e2e.sh" --image "$IMAGE_TAG" --skip-build
+fi

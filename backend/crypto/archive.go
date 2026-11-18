@@ -157,10 +157,16 @@ func DecryptReader(src io.ReadCloser, passphrase string) (io.ReadCloser, error) 
 		return nil, err
 	}
 
-	return &decryptReadCloser{
+	dec := &decryptReadCloser{
 		src: src,
 		gcm: gcm,
-	}, nil
+	}
+	// Authenticate the first chunk upfront so wrong passphrases fail before HTTP streaming begins.
+	if err := dec.nextChunk(); err != nil {
+		_ = src.Close()
+		return nil, err
+	}
+	return dec, nil
 }
 
 type decryptReadCloser struct {
@@ -170,38 +176,45 @@ type decryptReadCloser struct {
 	eof bool
 }
 
+func (d *decryptReadCloser) nextChunk() error {
+	var lenBuf [4]byte
+	if _, err := io.ReadFull(d.src, lenBuf[:]); err != nil {
+		return fmt.Errorf("%w: unexpected EOF", ErrInvalidArchive)
+	}
+	cipherLen := binary.BigEndian.Uint32(lenBuf[:])
+	if cipherLen == 0 {
+		d.eof = true
+		return nil
+	}
+	if cipherLen > chunkSize+1024 {
+		return fmt.Errorf("%w: invalid chunk size", ErrInvalidArchive)
+	}
+
+	nonce := make([]byte, nonceSize)
+	if _, err := io.ReadFull(d.src, nonce); err != nil {
+		return fmt.Errorf("%w: truncated nonce", ErrInvalidArchive)
+	}
+	ciphertext := make([]byte, cipherLen)
+	if _, err := io.ReadFull(d.src, ciphertext); err != nil {
+		return fmt.Errorf("%w: truncated ciphertext", ErrInvalidArchive)
+	}
+
+	plain, err := d.gcm.Open(nil, nonce, ciphertext, nil)
+	if err != nil {
+		return ErrInvalidArchive
+	}
+	d.buf = plain
+	return nil
+}
+
 func (d *decryptReadCloser) Read(p []byte) (int, error) {
 	for len(d.buf) == 0 {
 		if d.eof {
 			return 0, io.EOF
 		}
-		var lenBuf [4]byte
-		if _, err := io.ReadFull(d.src, lenBuf[:]); err != nil {
-			return 0, fmt.Errorf("%w: unexpected EOF", ErrInvalidArchive)
+		if err := d.nextChunk(); err != nil {
+			return 0, err
 		}
-		cipherLen := binary.BigEndian.Uint32(lenBuf[:])
-		if cipherLen == 0 {
-			d.eof = true
-			return 0, io.EOF
-		}
-		if cipherLen > chunkSize+1024 {
-			return 0, fmt.Errorf("%w: invalid chunk size", ErrInvalidArchive)
-		}
-
-		nonce := make([]byte, nonceSize)
-		if _, err := io.ReadFull(d.src, nonce); err != nil {
-			return 0, fmt.Errorf("%w: truncated nonce", ErrInvalidArchive)
-		}
-		ciphertext := make([]byte, cipherLen)
-		if _, err := io.ReadFull(d.src, ciphertext); err != nil {
-			return 0, fmt.Errorf("%w: truncated ciphertext", ErrInvalidArchive)
-		}
-
-		plain, err := d.gcm.Open(nil, nonce, ciphertext, nil)
-		if err != nil {
-			return 0, ErrInvalidArchive
-		}
-		d.buf = plain
 	}
 
 	n := copy(p, d.buf)

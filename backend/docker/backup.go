@@ -600,8 +600,8 @@ func (s *Service) RestoreBackupWithOptions(ctx context.Context, logEntry models.
 	}
 
 	var mounts []backupMountSpec
-	if err := json.Unmarshal([]byte(logEntry.VolumesJSON), &mounts); err != nil || len(mounts) == 0 {
-		return nil, fmt.Errorf("backup archive contains no restorable mount metadata")
+	if strings.TrimSpace(logEntry.VolumesJSON) != "" {
+		_ = json.Unmarshal([]byte(logEntry.VolumesJSON), &mounts)
 	}
 
 	stagingVol := strings.TrimSpace(opts.TargetVolumeName)
@@ -612,6 +612,10 @@ func (s *Service) RestoreBackupWithOptions(ctx context.Context, logEntry models.
 		if _, err := s.cli.VolumeCreate(ctx, volume.CreateOptions{Name: stagingVol}); err != nil {
 			return nil, fmt.Errorf("create staging volume %q: %w", stagingVol, err)
 		}
+	}
+
+	if len(mounts) == 0 && stagingVol == "" && opts.PreRestoreBackup {
+		return nil, fmt.Errorf("pre-restore snapshot requires existing mount metadata or target volume")
 	}
 
 	var preRestoreID *uint
@@ -648,26 +652,6 @@ func (s *Service) RestoreBackupWithOptions(ctx context.Context, logEntry models.
 		return nil, fmt.Errorf("initialize storage driver: %w", err)
 	}
 
-	rawStream, _, err := driver.Open(ctx, logEntry.StoragePath)
-	if err != nil {
-		return nil, err
-	}
-	archiveStream := rawStream
-	if logEntry.Encrypted || strings.HasSuffix(logEntry.StoragePath, ".enc") {
-		decStream, decErr := dvcrypto.DecryptReader(rawStream, s.ResolvePassphrase(provider))
-		if decErr != nil {
-			return nil, decErr
-		}
-		archiveStream = decStream
-	}
-	defer archiveStream.Close()
-
-	tarStream, err := dvcrypto.OpenCompressedReader(archiveStream, logEntry.FileName)
-	if err != nil {
-		return nil, fmt.Errorf("decompress archive: %w", err)
-	}
-	defer tarStream.Close()
-
 	var selectedPaths []string
 	if len(opts.Paths) > 0 {
 		selectedPaths = NormalizeArchivePaths(opts.Paths)
@@ -678,6 +662,28 @@ func (s *Service) RestoreBackupWithOptions(ctx context.Context, logEntry models.
 
 	if err := s.ensureHelperImage(ctx); err != nil {
 		return nil, fmt.Errorf("prepare helper image %s: %w", s.helperImage, err)
+	}
+
+	// Stage, decrypt, decompress, and checksum/tar-verify the complete archive BEFORE
+	// pausing containers or wiping target volumes so corrupted transfers never cause data loss.
+	verifiedTar, inferredMounts, cleanupTar, err := s.stageVerifiedRestoreTar(ctx, provider, driver, logEntry)
+	if err != nil {
+		return nil, err
+	}
+	defer cleanupTar()
+
+	if len(mounts) == 0 && stagingVol == "" {
+		if len(inferredMounts) == 0 {
+			return nil, fmt.Errorf("backup archive contains no restorable mount metadata")
+		}
+		for _, m := range inferredMounts {
+			if m.Type == "volume" && m.Name != "" {
+				if _, vErr := s.cli.VolumeCreate(ctx, volume.CreateOptions{Name: m.Name}); vErr != nil {
+					return nil, fmt.Errorf("ensure restore volume %q: %w", m.Name, vErr)
+				}
+			}
+		}
+		mounts = inferredMounts
 	}
 
 	startedAt := time.Now().UTC()
@@ -713,15 +719,15 @@ func (s *Service) RestoreBackupWithOptions(ctx context.Context, logEntry models.
 		}
 	}
 
-	var restoreInput io.Reader = tarStream
+	var restoreInput io.Reader = verifiedTar
 	if len(selectedPaths) > 0 {
-		filtered, stopFilter := FilterTarStream(tarStream, selectedPaths)
-		// Runs before the tarStream/archiveStream closes deferred above.
+		filtered, stopFilter := FilterTarStream(verifiedTar, selectedPaths)
 		defer stopFilter()
 		restoreInput = filtered
 	}
 
-	if err := s.runRestoreHelper(ctx, mounts, stagingVol, restoreInput); err != nil {
+	cleanBeforeExtract := len(selectedPaths) == 0 && stagingVol == ""
+	if err := s.runRestoreHelper(ctx, mounts, stagingVol, cleanBeforeExtract, restoreInput); err != nil {
 		return nil, err
 	}
 	unpauseAll()
@@ -736,6 +742,116 @@ func (s *Service) RestoreBackupWithOptions(ctx context.Context, logEntry models.
 		PausedContainers:   pausedNames,
 		DurationMs:         time.Since(startedAt).Milliseconds(),
 	}, nil
+}
+
+type teeReadCloser struct {
+	r io.Reader
+	c io.Closer
+}
+
+func (t teeReadCloser) Read(p []byte) (int, error) { return t.r.Read(p) }
+func (t teeReadCloser) Close() error              { return t.c.Close() }
+
+func (s *Service) stageVerifiedRestoreTar(
+	ctx context.Context,
+	provider models.StorageProvider,
+	driver storage.Driver,
+	logEntry models.BackupLog,
+) (*os.File, []backupMountSpec, func(), error) {
+	rawStream, _, err := driver.Open(ctx, logEntry.StoragePath)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+
+	hasher := sha256.New()
+	countedRaw := teeReadCloser{r: io.TeeReader(rawStream, hasher), c: rawStream}
+
+	var archiveStream io.ReadCloser = countedRaw
+	if logEntry.Encrypted || strings.HasSuffix(logEntry.StoragePath, ".enc") {
+		decStream, decErr := dvcrypto.DecryptReader(countedRaw, s.ResolvePassphrase(provider))
+		if decErr != nil {
+			_ = rawStream.Close()
+			return nil, nil, nil, decErr
+		}
+		archiveStream = decStream
+	}
+	defer archiveStream.Close()
+
+	tarStream, err := dvcrypto.OpenCompressedReader(archiveStream, logEntry.FileName)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("decompress archive: %w", err)
+	}
+	defer tarStream.Close()
+
+	tmpTar, err := os.CreateTemp(s.backupDir, "dockvault-restore-*.tar")
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("create staging restore archive: %w", err)
+	}
+	cleanup := func() {
+		_ = tmpTar.Close()
+		_ = os.Remove(tmpTar.Name())
+	}
+
+	if _, err := io.Copy(tmpTar, tarStream); err != nil {
+		cleanup()
+		return nil, nil, nil, fmt.Errorf("verify/decompress archive: %w", err)
+	}
+	if err := tarStream.Close(); err != nil {
+		cleanup()
+		return nil, nil, nil, fmt.Errorf("finalize decompressed archive: %w", err)
+	}
+	// Drain any remaining framing/padding bytes from rawStream so SHA-256 covers the full stored file.
+	_, _ = io.Copy(io.Discard, countedRaw)
+	if logEntry.ChecksumSHA256 != "" {
+		actualSum := hex.EncodeToString(hasher.Sum(nil))
+		if actualSum != logEntry.ChecksumSHA256 {
+			cleanup()
+			return nil, nil, nil, fmt.Errorf("archive checksum mismatch (expected %s, got %s)", logEntry.ChecksumSHA256, actualSum)
+		}
+	}
+
+	if _, err := tmpTar.Seek(0, io.SeekStart); err != nil {
+		cleanup()
+		return nil, nil, nil, err
+	}
+	var inferred []backupMountSpec
+	seenVols := make(map[string]bool)
+	tr := tar.NewReader(tmpTar)
+	for {
+		hdr, err := tr.Next()
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			cleanup()
+			return nil, nil, nil, fmt.Errorf("corrupt tar archive: %w", err)
+		}
+		key := ArchivePathKey(hdr.Name)
+		if key != "" && key != "." {
+			top := key
+			if idx := strings.IndexByte(key, '/'); idx >= 0 {
+				top = key[:idx]
+			}
+			if strings.HasPrefix(top, "vol_") && !seenVols[top] {
+				volName := strings.TrimPrefix(top, "vol_")
+				if _, nameErr := storage.SafeFileName(volName); nameErr == nil {
+					seenVols[top] = true
+					inferred = append(inferred, backupMountSpec{
+						MountInfo: MountInfo{
+							Type: "volume",
+							Name: volName,
+						},
+						ArchiveDir: top,
+					})
+				}
+			}
+		}
+	}
+	if _, err := tmpTar.Seek(0, io.SeekStart); err != nil {
+		cleanup()
+		return nil, nil, nil, err
+	}
+	return tmpTar, inferred, cleanup, nil
 }
 
 func (s *Service) execInContainer(ctx context.Context, containerID, shellCmd string) error {
@@ -1041,24 +1157,8 @@ func copyTarAndAppendDB(src io.Reader, dst io.Writer, dumps []dbDumpSpec) error 
 	tr := tar.NewReader(src)
 	tw := tar.NewWriter(dst)
 
-	for {
-		hdr, err := tr.Next()
-		if errors.Is(err, io.EOF) {
-			break
-		}
-		if err != nil {
-			return err
-		}
-		if err := tw.WriteHeader(hdr); err != nil {
-			return err
-		}
-		if hdr.Size > 0 {
-			if _, err := io.Copy(tw, tr); err != nil {
-				return err
-			}
-		}
-	}
-
+	// Write db_dumps/ first so hot dumps appear at the top of Archive Inspector (max 500 entries)
+	// and can be extracted via /file without streaming the entire volume archive first.
 	now := time.Now().UTC()
 	if err := tw.WriteHeader(&tar.Header{
 		Name:     "db_dumps/",
@@ -1091,10 +1191,28 @@ func copyTarAndAppendDB(src io.Reader, dst io.Writer, dumps []dbDumpSpec) error 
 		_ = f.Close()
 	}
 
+	for {
+		hdr, err := tr.Next()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return err
+		}
+		if err := tw.WriteHeader(hdr); err != nil {
+			return err
+		}
+		if hdr.Size > 0 {
+			if _, err := io.Copy(tw, tr); err != nil {
+				return err
+			}
+		}
+	}
+
 	return tw.Close()
 }
 
-func (s *Service) runRestoreHelper(ctx context.Context, mounts []backupMountSpec, stagingVol string, tarStream io.Reader) error {
+func (s *Service) runRestoreHelper(ctx context.Context, mounts []backupMountSpec, stagingVol string, cleanTarget bool, tarStream io.Reader) error {
 	var binds []string
 	if stagingVol != "" {
 		binds = []string{fmt.Sprintf("%s:/restore:rw", stagingVol)}
@@ -1109,11 +1227,20 @@ func (s *Service) runRestoreHelper(ctx context.Context, mounts []backupMountSpec
 		}
 	}
 
+	cmd := []string{"tar", "-xf", "-", "-C", "/restore"}
+	if cleanTarget {
+		// Clear post-backup files (e.g. stray DB tables/WALs) inside each target mount before extracting a full restore.
+		cmd = []string{
+			"sh", "-c",
+			`for d in /restore/*; do [ -d "$d" ] && find "$d" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +; done && exec tar -xf - -C /restore`,
+		}
+	}
+
 	resp, err := s.cli.ContainerCreate(
 		ctx,
 		&container.Config{
 			Image:        s.helperImage,
-			Cmd:          []string{"tar", "-xf", "-", "-C", "/restore"},
+			Cmd:          cmd,
 			AttachStdin:  true,
 			OpenStdin:    true,
 			StdinOnce:    true,
