@@ -288,9 +288,21 @@ export function Schedules({
                       )}
                     </td>
                     <td className="px-4 py-3.5">
-                      <div className="flex items-center gap-1.5">
-                        <Badge variant="info">{s.targetType}</Badge>
-                        <span className="text-zinc-200">{s.targetName}</span>
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        {(s.targets?.length
+                          ? s.targets
+                          : [{ targetType: s.targetType, targetId: s.targetId, targetName: s.targetName }]
+                        ).map((t) => (
+                          <span
+                            key={`${t.targetType}:${t.targetId}`}
+                            className="inline-flex items-center gap-1 rounded-md border border-zinc-800 bg-zinc-950/70 px-2 py-0.5 text-xs text-zinc-200"
+                          >
+                            <Badge variant="info" className="text-[10px] py-0 px-1">
+                              {t.targetType}
+                            </Badge>
+                            <span>{t.targetName}</span>
+                          </span>
+                        ))}
                       </div>
                     </td>
                     <td className="px-4 py-3.5">

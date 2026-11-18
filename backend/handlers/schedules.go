@@ -13,11 +13,12 @@ import (
 )
 
 type schedulePayload struct {
-	Name               string `json:"name"`
-	TargetType         string `json:"targetType"`
-	TargetID           string `json:"targetId"`
-	TargetName         string `json:"targetName"`
-	CronExpr           string `json:"cronExpr"`
+	Name               string                  `json:"name"`
+	TargetType         string                  `json:"targetType"`
+	TargetID           string                  `json:"targetId"`
+	TargetName         string                  `json:"targetName"`
+	Targets            []models.ScheduleTarget `json:"targets"`
+	CronExpr           string                  `json:"cronExpr"`
 	StorageProviderID  uint   `json:"storageProviderId"`
 	SecondaryStorageID *uint  `json:"secondaryStorageId"`
 	PauseContainer     *bool  `json:"pauseContainer"`
@@ -91,13 +92,9 @@ func (s *Server) CreateSchedule(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid JSON body"})
 	}
 
-	targetType := strings.TrimSpace(body.TargetType)
-	if targetType != "container" && targetType != "stack" && targetType != "volume" {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "targetType must be 'container', 'stack', or 'volume'"})
-	}
-	targetID := strings.TrimSpace(body.TargetID)
-	if targetID == "" {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "targetId is required"})
+	targets, err := normalizeScheduleTargets(body.TargetType, body.TargetID, body.TargetName, body.Targets, true)
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
 	}
 	cronExpr := strings.TrimSpace(body.CronExpr)
 	if _, err := scheduler.ValidateCron(cronExpr); err != nil {
@@ -127,15 +124,6 @@ func (s *Server) CreateSchedule(c *fiber.Ctx) error {
 			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "selected secondary storage provider does not exist"})
 		}
 		secID = body.SecondaryStorageID
-	}
-
-	targetName := strings.TrimSpace(body.TargetName)
-	if targetName == "" {
-		targetName = targetID
-	}
-	name := strings.TrimSpace(body.Name)
-	if name == "" {
-		name = targetName + " backup"
 	}
 
 	pause := true
@@ -176,10 +164,7 @@ func (s *Server) CreateSchedule(c *fiber.Ctx) error {
 	excludes := strings.Join(docker.ParseExcludePatterns(body.ExcludePatterns), "\n")
 
 	sched := models.BackupSchedule{
-		Name:               name,
-		TargetType:         targetType,
-		TargetID:           targetID,
-		TargetName:         targetName,
+		Name:               strings.TrimSpace(body.Name),
 		CronExpr:           cronExpr,
 		StorageProviderID:  provider.ID,
 		SecondaryStorageID: secID,
@@ -196,6 +181,10 @@ func (s *Server) CreateSchedule(c *fiber.Ctx) error {
 		DBHotDump:          dbHotDump,
 		Enabled:            enabled,
 		AlertAfterHours:    alertAfter,
+	}
+	sched.SetTargets(targets)
+	if sched.Name == "" {
+		sched.Name = sched.TargetName + " backup"
 	}
 
 	if err := s.db.Create(&sched).Error; err != nil {
@@ -231,17 +220,30 @@ func (s *Server) UpdateSchedule(c *fiber.Ctx) error {
 	if v := strings.TrimSpace(body.Name); v != "" {
 		sched.Name = v
 	}
-	if v := strings.TrimSpace(body.TargetType); v != "" {
-		if v != "container" && v != "stack" && v != "volume" {
-			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "targetType must be 'container', 'stack', or 'volume'"})
+	if len(body.Targets) > 0 {
+		targets, err := normalizeScheduleTargets("", "", "", body.Targets, true)
+		if err != nil {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
 		}
-		sched.TargetType = v
-	}
-	if v := strings.TrimSpace(body.TargetID); v != "" {
-		sched.TargetID = v
-	}
-	if v := strings.TrimSpace(body.TargetName); v != "" {
-		sched.TargetName = v
+		sched.SetTargets(targets)
+	} else if strings.TrimSpace(body.TargetType) != "" || strings.TrimSpace(body.TargetID) != "" || strings.TrimSpace(body.TargetName) != "" {
+		tType := strings.TrimSpace(body.TargetType)
+		if tType == "" {
+			tType = sched.TargetType
+		}
+		tID := strings.TrimSpace(body.TargetID)
+		if tID == "" {
+			tID = sched.TargetID
+		}
+		tName := strings.TrimSpace(body.TargetName)
+		if tName == "" {
+			tName = tID
+		}
+		targets, err := normalizeScheduleTargets(tType, tID, tName, nil, true)
+		if err != nil {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
+		}
+		sched.SetTargets(targets)
 	}
 	if v := strings.TrimSpace(body.CronExpr); v != "" {
 		if _, err := scheduler.ValidateCron(v); err != nil {
@@ -404,14 +406,12 @@ func (s *Server) CloneSchedule(c *fiber.Ctx) error {
 		}
 	}
 
-	newFrom := func(t cloneTarget, name string, enabled bool) models.BackupSchedule {
+	newFrom := func(targets []models.ScheduleTarget, name string, enabled bool) models.BackupSchedule {
 		cp := src
 		cp.ID = 0
 		cp.StorageProvider = nil
 		cp.SecondaryStorageProvider = nil
-		cp.TargetType = t.TargetType
-		cp.TargetID = t.TargetID
-		cp.TargetName = t.TargetName
+		cp.SetTargets(targets)
 		cp.Name = name
 		cp.Enabled = enabled
 		cp.ManagedByLabel = false
@@ -427,10 +427,17 @@ func (s *Server) CloneSchedule(c *fiber.Ctx) error {
 	skipped := []string{}
 	if len(body.Targets) == 0 {
 		// A paused copy avoids two identical jobs contending for the same target lock.
-		toCreate = append(toCreate, newFrom(cloneTarget{
-			TargetType: src.TargetType, TargetID: src.TargetID, TargetName: src.TargetName,
-		}, src.Name+" (copy)", false))
+		toCreate = append(toCreate, newFrom(src.ResolvedTargets(), src.Name+" (copy)", false))
 	} else {
+		var existingSchedules []models.BackupSchedule
+		s.db.Find(&existingSchedules)
+		scheduledKeys := make(map[string]bool)
+		for _, es := range existingSchedules {
+			for _, tgt := range es.ResolvedTargets() {
+				scheduledKeys[tgt.TargetType+":"+tgt.TargetID] = true
+			}
+		}
+
 		seen := make(map[string]bool)
 		for _, t := range body.Targets {
 			t.TargetType = strings.TrimSpace(t.TargetType)
@@ -450,15 +457,15 @@ func (s *Server) CloneSchedule(c *fiber.Ctx) error {
 				continue
 			}
 			seen[key] = true
-			var existing int64
-			s.db.Model(&models.BackupSchedule{}).
-				Where("target_type = ? AND target_id = ?", t.TargetType, t.TargetID).
-				Count(&existing)
-			if existing > 0 {
+			if scheduledKeys[key] {
 				skipped = append(skipped, t.TargetName)
 				continue
 			}
-			toCreate = append(toCreate, newFrom(t, t.TargetName+" backup", src.Enabled))
+			toCreate = append(toCreate, newFrom([]models.ScheduleTarget{{
+				TargetType: t.TargetType,
+				TargetID:   t.TargetID,
+				TargetName: t.TargetName,
+			}}, t.TargetName+" backup", src.Enabled))
 		}
 	}
 
@@ -479,4 +486,50 @@ func (s *Server) CloneSchedule(c *fiber.Ctx) error {
 		"schedules": created,
 		"skipped":   skipped,
 	})
+}
+
+func normalizeScheduleTargets(
+	targetType, targetID, targetName string,
+	rawTargets []models.ScheduleTarget,
+	requireOne bool,
+) ([]models.ScheduleTarget, error) {
+	candidates := rawTargets
+	if len(candidates) == 0 && (strings.TrimSpace(targetType) != "" || strings.TrimSpace(targetID) != "") {
+		candidates = []models.ScheduleTarget{{
+			TargetType: targetType,
+			TargetID:   targetID,
+			TargetName: targetName,
+		}}
+	}
+
+	seen := make(map[string]bool, len(candidates))
+	out := make([]models.ScheduleTarget, 0, len(candidates))
+	for _, t := range candidates {
+		tType := strings.TrimSpace(t.TargetType)
+		if tType != "container" && tType != "stack" && tType != "volume" {
+			return nil, fiber.NewError(fiber.StatusBadRequest, "targetType must be 'container', 'stack', or 'volume'")
+		}
+		tID := strings.TrimSpace(t.TargetID)
+		if tID == "" {
+			return nil, fiber.NewError(fiber.StatusBadRequest, "targetId is required")
+		}
+		tName := strings.TrimSpace(t.TargetName)
+		if tName == "" {
+			tName = tID
+		}
+		key := tType + ":" + tID
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, models.ScheduleTarget{
+			TargetType: tType,
+			TargetID:   tID,
+			TargetName: tName,
+		})
+	}
+	if requireOne && len(out) == 0 {
+		return nil, fiber.NewError(fiber.StatusBadRequest, "at least one target must be selected")
+	}
+	return out, nil
 }

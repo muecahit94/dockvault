@@ -66,14 +66,19 @@ type RestoreOptions struct {
 
 // RestoreResult summarizes a completed volume restore operation.
 type RestoreResult struct {
-	Restored           bool     `json:"restored"`
-	TargetName         string   `json:"targetName"`
-	RestoredMounts     int      `json:"restoredMounts"`
-	RestoredPaths      int      `json:"restoredPaths,omitempty"`
-	RestoredVolume     string   `json:"restoredVolume,omitempty"`
-	PreRestoreBackupID *uint    `json:"preRestoreBackupId,omitempty"`
-	PausedContainers   []string `json:"pausedContainers"`
-	DurationMs         int64    `json:"durationMs"`
+	Restored           bool       `json:"restored"`
+	RestoreID          *uint      `json:"restoreId,omitempty"`
+	BackupLogID        uint       `json:"backupLogId,omitempty"`
+	BackupFileName     string     `json:"backupFileName,omitempty"`
+	BackupStartedAt    *time.Time `json:"backupStartedAt,omitempty"`
+	RestoredAt         *time.Time `json:"restoredAt,omitempty"`
+	TargetName         string     `json:"targetName"`
+	RestoredMounts     int        `json:"restoredMounts"`
+	RestoredPaths      int        `json:"restoredPaths,omitempty"`
+	RestoredVolume     string     `json:"restoredVolume,omitempty"`
+	PreRestoreBackupID *uint      `json:"preRestoreBackupId,omitempty"`
+	PausedContainers   []string   `json:"pausedContainers"`
+	DurationMs         int64      `json:"durationMs"`
 }
 
 type backupMountSpec struct {
@@ -618,7 +623,14 @@ func (s *Service) RestoreBackupWithOptions(ctx context.Context, logEntry models.
 		return nil, fmt.Errorf("pre-restore snapshot requires existing mount metadata or target volume")
 	}
 
+	opStartedAt := time.Now().UTC()
 	var preRestoreID *uint
+	var selectedPaths []string
+	failRestore := func(runErr error) (*RestoreResult, error) {
+		s.recordRestoreLog(logEntry, stagingVol, preRestoreID, len(mounts), len(selectedPaths), opStartedAt, runErr)
+		return nil, runErr
+	}
+
 	if stagingVol == "" && opts.PreRestoreBackup {
 		snap, snapErr := s.ExecuteBackup(ctx, BackupRequest{
 			TargetType:        logEntry.TargetType,
@@ -630,7 +642,7 @@ func (s *Service) RestoreBackupWithOptions(ctx context.Context, logEntry models.
 			Note:              fmt.Sprintf("Safety snapshot before restoring backup #%d", logEntry.ID),
 		})
 		if snapErr != nil {
-			return nil, fmt.Errorf("pre-restore safety snapshot failed (restore aborted): %w", snapErr)
+			return failRestore(fmt.Errorf("pre-restore safety snapshot failed (restore aborted): %w", snapErr))
 		}
 		if snap != nil {
 			preRestoreID = &snap.ID
@@ -645,48 +657,46 @@ func (s *Service) RestoreBackupWithOptions(ctx context.Context, logEntry models.
 
 	provider, err := s.resolveStorageProvider(logEntry.StorageProviderID)
 	if err != nil {
-		return nil, err
+		return failRestore(err)
 	}
 	driver, err := storage.NewDriver(provider, s.backupDir)
 	if err != nil {
-		return nil, fmt.Errorf("initialize storage driver: %w", err)
+		return failRestore(fmt.Errorf("initialize storage driver: %w", err))
 	}
 
-	var selectedPaths []string
 	if len(opts.Paths) > 0 {
 		selectedPaths = NormalizeArchivePaths(opts.Paths)
 		if len(selectedPaths) == 0 {
-			return nil, fmt.Errorf("no valid paths selected for restore")
+			return failRestore(fmt.Errorf("no valid paths selected for restore"))
 		}
 	}
 
 	if err := s.ensureHelperImage(ctx); err != nil {
-		return nil, fmt.Errorf("prepare helper image %s: %w", s.helperImage, err)
+		return failRestore(fmt.Errorf("prepare helper image %s: %w", s.helperImage, err))
 	}
 
 	// Stage, decrypt, decompress, and checksum/tar-verify the complete archive BEFORE
 	// pausing containers or wiping target volumes so corrupted transfers never cause data loss.
 	verifiedTar, inferredMounts, cleanupTar, err := s.stageVerifiedRestoreTar(ctx, provider, driver, logEntry)
 	if err != nil {
-		return nil, err
+		return failRestore(err)
 	}
 	defer cleanupTar()
 
 	if len(mounts) == 0 && stagingVol == "" {
 		if len(inferredMounts) == 0 {
-			return nil, fmt.Errorf("backup archive contains no restorable mount metadata")
+			return failRestore(fmt.Errorf("backup archive contains no restorable mount metadata"))
 		}
 		for _, m := range inferredMounts {
 			if m.Type == "volume" && m.Name != "" {
 				if _, vErr := s.cli.VolumeCreate(ctx, volume.CreateOptions{Name: m.Name}); vErr != nil {
-					return nil, fmt.Errorf("ensure restore volume %q: %w", m.Name, vErr)
+					return failRestore(fmt.Errorf("ensure restore volume %q: %w", m.Name, vErr))
 				}
 			}
 		}
 		mounts = inferredMounts
 	}
 
-	startedAt := time.Now().UTC()
 	var pausedIDs []string
 	var pausedNames []string
 	unpauseAll := func() {
@@ -711,7 +721,7 @@ func (s *Service) RestoreBackupWithOptions(ctx context.Context, logEntry models.
 					continue
 				}
 				if err := s.cli.ContainerPause(ctx, c.ID); err != nil {
-					return nil, fmt.Errorf("pause container %s before restore: %w", c.Name, err)
+					return failRestore(fmt.Errorf("pause container %s before restore: %w", c.Name, err))
 				}
 				pausedIDs = append(pausedIDs, c.ID)
 				pausedNames = append(pausedNames, c.Name)
@@ -728,20 +738,77 @@ func (s *Service) RestoreBackupWithOptions(ctx context.Context, logEntry models.
 
 	cleanBeforeExtract := len(selectedPaths) == 0 && stagingVol == ""
 	if err := s.runRestoreHelper(ctx, mounts, stagingVol, cleanBeforeExtract, restoreInput); err != nil {
-		return nil, err
+		return failRestore(err)
 	}
 	unpauseAll()
 
-	return &RestoreResult{
+	recorded := s.recordRestoreLog(logEntry, stagingVol, preRestoreID, len(mounts), len(selectedPaths), opStartedAt, nil)
+	durationMs := time.Since(opStartedAt).Milliseconds()
+	res := &RestoreResult{
 		Restored:           true,
+		BackupLogID:        logEntry.ID,
+		BackupFileName:     logEntry.FileName,
+		BackupStartedAt:    &logEntry.StartedAt,
 		TargetName:         logEntry.TargetName,
 		RestoredMounts:     len(mounts),
 		RestoredPaths:      len(selectedPaths),
 		RestoredVolume:     stagingVol,
 		PreRestoreBackupID: preRestoreID,
 		PausedContainers:   pausedNames,
+		DurationMs:         durationMs,
+	}
+	if recorded != nil {
+		res.RestoreID = &recorded.ID
+		res.RestoredAt = &recorded.RestoredAt
+	}
+	return res, nil
+}
+
+func (s *Service) recordRestoreLog(
+	logEntry models.BackupLog,
+	stagingVol string,
+	preRestoreID *uint,
+	mountsCount, pathsCount int,
+	startedAt time.Time,
+	runErr error,
+) *models.RestoreLog {
+	if s.db == nil {
+		return nil
+	}
+	mode := "inplace"
+	if stagingVol != "" {
+		mode = "staging"
+	}
+	status := "success"
+	errMsg := ""
+	if runErr != nil {
+		status = "failed"
+		errMsg = runErr.Error()
+	}
+	entry := models.RestoreLog{
+		BackupLogID:        logEntry.ID,
+		BackupFileName:     logEntry.FileName,
+		BackupStartedAt:    logEntry.StartedAt,
+		BackupTrigger:      logEntry.Trigger,
+		BackupNote:         logEntry.Note,
+		TargetType:         logEntry.TargetType,
+		TargetID:           logEntry.TargetID,
+		TargetName:         logEntry.TargetName,
+		Mode:               mode,
+		TargetVolume:       stagingVol,
+		PreRestoreBackupID: preRestoreID,
+		RestoredMounts:     mountsCount,
+		RestoredPaths:      pathsCount,
+		Status:             status,
 		DurationMs:         time.Since(startedAt).Milliseconds(),
-	}, nil
+		ErrorMessage:       errMsg,
+		RestoredAt:         time.Now().UTC(),
+	}
+	if err := s.db.Create(&entry).Error; err != nil {
+		log.Printf("dockvault: warning: persist restore log: %v", err)
+		return nil
+	}
+	return &entry
 }
 
 type teeReadCloser struct {

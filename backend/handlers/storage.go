@@ -30,6 +30,20 @@ type storagePayload struct {
 	AzureContainer           string `json:"azureContainer"`
 	AzureAccessTier          string `json:"azureAccessTier"`
 	AzureAutoCreateContainer *bool  `json:"azureAutoCreateContainer"`
+	Host                     string `json:"host"`
+	Port                     *int   `json:"port"`
+	Username                 string `json:"username"`
+	Password                 string `json:"password"`
+	SSHUseLocalKey           *bool  `json:"sshUseLocalKey"`
+	SSHKeyPath               string `json:"sshKeyPath"`
+	SSHPrivateKey            string `json:"sshPrivateKey"`
+	SSHKeyPassphrase         string `json:"sshKeyPassphrase"`
+	RemotePath               string `json:"remotePath"`
+	SMBShare                 string `json:"smbShare"`
+	SMBDomain                string `json:"smbDomain"`
+	NFSExport                string `json:"nfsExport"`
+	NFSUID                   *int   `json:"nfsUid"`
+	NFSGID                   *int   `json:"nfsGid"`
 	EncryptBackups           *bool  `json:"encryptBackups"`
 	EncryptionPassphrase     string `json:"encryptionPassphrase"`
 }
@@ -368,8 +382,10 @@ func (s *Server) buildStorageModel(body storagePayload, existing *models.Storage
 	if pType == "" && existing != nil {
 		pType = existing.Type
 	}
-	if pType != "local" && pType != "s3" && pType != "azure" {
-		return models.StorageProvider{}, fiber.NewError(fiber.StatusBadRequest, "type must be 'local', 's3', or 'azure'")
+	switch pType {
+	case "local", "s3", "azure", "ssh", "smb", "nfs":
+	default:
+		return models.StorageProvider{}, fiber.NewError(fiber.StatusBadRequest, "type must be 'local', 's3', 'azure', 'ssh', 'smb', or 'nfs'")
 	}
 
 	useSSL := true
@@ -396,6 +412,29 @@ func (s *Server) buildStorageModel(body storagePayload, existing *models.Storage
 		encryptBackups = *body.EncryptBackups
 	}
 
+	port := 0
+	nfsUID := 0
+	nfsGID := 0
+	sshUseLocalKey := false
+	if existing != nil {
+		port = existing.Port
+		nfsUID = existing.NFSUID
+		nfsGID = existing.NFSGID
+		sshUseLocalKey = existing.SSHUseLocalKey
+	}
+	if body.Port != nil {
+		port = *body.Port
+	}
+	if body.NFSUID != nil {
+		nfsUID = *body.NFSUID
+	}
+	if body.NFSGID != nil {
+		nfsGID = *body.NFSGID
+	}
+	if body.SSHUseLocalKey != nil {
+		sshUseLocalKey = *body.SSHUseLocalKey
+	}
+
 	p := models.StorageProvider{
 		Name:                     name,
 		Type:                     pType,
@@ -415,6 +454,20 @@ func (s *Server) buildStorageModel(body storagePayload, existing *models.Storage
 		AzureContainer:           strings.TrimSpace(body.AzureContainer),
 		AzureAccessTier:          strings.TrimSpace(body.AzureAccessTier),
 		AzureAutoCreateContainer: autoCreate,
+		Host:                     strings.TrimSpace(body.Host),
+		Port:                     port,
+		Username:                 strings.TrimSpace(body.Username),
+		Password:                 body.Password,
+		SSHUseLocalKey:           sshUseLocalKey,
+		SSHKeyPath:               strings.TrimSpace(body.SSHKeyPath),
+		SSHPrivateKey:            strings.TrimSpace(body.SSHPrivateKey),
+		SSHKeyPassphrase:         body.SSHKeyPassphrase,
+		RemotePath:               strings.TrimSpace(body.RemotePath),
+		SMBShare:                 strings.TrimSpace(body.SMBShare),
+		SMBDomain:                strings.TrimSpace(body.SMBDomain),
+		NFSExport:                strings.TrimSpace(body.NFSExport),
+		NFSUID:                   nfsUID,
+		NFSGID:                   nfsGID,
 		EncryptBackups:           encryptBackups,
 		EncryptionPassphrase:     body.EncryptionPassphrase,
 	}
@@ -422,6 +475,15 @@ func (s *Server) buildStorageModel(body storagePayload, existing *models.Storage
 	if existing != nil {
 		if p.SecretKey == "" {
 			p.SecretKey = existing.SecretKey
+		}
+		if p.Password == "" {
+			p.Password = existing.Password
+		}
+		if p.SSHPrivateKey == "" {
+			p.SSHPrivateKey = existing.SSHPrivateKey
+		}
+		if p.SSHKeyPassphrase == "" {
+			p.SSHKeyPassphrase = existing.SSHKeyPassphrase
 		}
 		if p.EncryptionPassphrase == "" {
 			p.EncryptionPassphrase = existing.EncryptionPassphrase
@@ -456,6 +518,24 @@ func (s *Server) buildStorageModel(body storagePayload, existing *models.Storage
 			p.AzureAccessTier = "Cool"
 		}
 		if _, err := storage.NewAzureDriver(p); err != nil {
+			return models.StorageProvider{}, fiber.NewError(fiber.StatusBadRequest, err.Error())
+		}
+		return p, nil
+
+	case "ssh":
+		if _, err := storage.NewSSHDriver(p); err != nil {
+			return models.StorageProvider{}, fiber.NewError(fiber.StatusBadRequest, err.Error())
+		}
+		return p, nil
+
+	case "smb":
+		if _, err := storage.NewSMBDriver(p); err != nil {
+			return models.StorageProvider{}, fiber.NewError(fiber.StatusBadRequest, err.Error())
+		}
+		return p, nil
+
+	case "nfs":
+		if _, err := storage.NewNFSDriver(p); err != nil {
 			return models.StorageProvider{}, fiber.NewError(fiber.StatusBadRequest, err.Error())
 		}
 		return p, nil

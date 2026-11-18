@@ -78,6 +78,20 @@ const EMPTY_FORM = {
   azureContainer: '',
   azureAccessTier: 'Cool',
   azureAutoCreateContainer: true,
+  host: '',
+  port: '',
+  username: '',
+  password: '',
+  sshUseLocalKey: false,
+  sshKeyPath: '',
+  sshPrivateKey: '',
+  sshKeyPassphrase: '',
+  remotePath: '',
+  smbShare: '',
+  smbDomain: '',
+  nfsExport: '',
+  nfsUid: '0',
+  nfsGid: '0',
   encryptBackups: false,
   encryptionPassphrase: '',
 }
@@ -264,6 +278,20 @@ export function Settings({
       azureContainer: provider.azureContainer || '',
       azureAccessTier: provider.azureAccessTier || 'Cool',
       azureAutoCreateContainer: provider.azureAutoCreateContainer ?? true,
+      host: provider.host || '',
+      port: provider.port ? String(provider.port) : '',
+      username: provider.username || '',
+      password: '',
+      sshUseLocalKey: Boolean(provider.sshUseLocalKey),
+      sshKeyPath: provider.sshKeyPath || '',
+      sshPrivateKey: '',
+      sshKeyPassphrase: '',
+      remotePath: provider.remotePath || '',
+      smbShare: provider.smbShare || '',
+      smbDomain: provider.smbDomain || '',
+      nfsExport: provider.nfsExport || '',
+      nfsUid: provider.nfsUid !== undefined ? String(provider.nfsUid) : '0',
+      nfsGid: provider.nfsGid !== undefined ? String(provider.nfsGid) : '0',
       encryptBackups: Boolean(provider.encryptBackups),
       encryptionPassphrase: '',
     })
@@ -293,7 +321,12 @@ export function Settings({
   async function handleTestForm() {
     setTestingForm(true)
     try {
-      const res = await api.testUnsavedStorageProvider(form)
+      const res = await api.testUnsavedStorageProvider({
+        ...form,
+        port: form.port !== '' ? Number(form.port) || 0 : 0,
+        nfsUid: form.nfsUid !== '' ? Number(form.nfsUid) || 0 : 0,
+        nfsGid: form.nfsGid !== '' ? Number(form.nfsGid) || 0 : 0,
+      })
       notify('success', formatTestToast(res))
     } catch (err) {
       notify('error', `Connection failed: ${err.message}`)
@@ -305,12 +338,18 @@ export function Settings({
   async function handleSave(e) {
     e.preventDefault()
     setSaving(true)
+    const payload = {
+      ...form,
+      port: form.port !== '' ? Number(form.port) || 0 : 0,
+      nfsUid: form.nfsUid !== '' ? Number(form.nfsUid) || 0 : 0,
+      nfsGid: form.nfsGid !== '' ? Number(form.nfsGid) || 0 : 0,
+    }
     try {
       if (editing) {
-        await api.updateStorageProvider(editing.id, form)
+        await api.updateStorageProvider(editing.id, payload)
         notify('success', `Updated "${form.name}"`)
       } else {
-        await api.createStorageProvider(form)
+        await api.createStorageProvider(payload)
         notify('success', `Added storage destination "${form.name}"`)
       }
       setModalOpen(false)
@@ -520,6 +559,55 @@ export function Settings({
         </div>
       )
     }
+    if (p.type === 'ssh') {
+      const authParts = []
+      if (p.sshUseLocalKey) {
+        authParts.push(`Local Key (${p.sshKeyPath || 'auto ~/.ssh'})`)
+      }
+      if (p.hasSshPrivateKey) {
+        authParts.push('SSH Key')
+      }
+      if (p.hasPassword) {
+        authParts.push('Password')
+      }
+      return (
+        <div className="mt-1 space-y-0.5 text-xs text-zinc-400">
+          <p className="font-mono">
+            sftp://{p.username ? `${p.username}@` : ''}
+            {p.host}:{p.port || 22}/{String(p.remotePath || '.').replace(/^\/+/, '')}
+          </p>
+          <p>Auth: {authParts.length > 0 ? authParts.join(' + ') : 'Unset'}</p>
+        </div>
+      )
+    }
+    if (p.type === 'smb') {
+      return (
+        <div className="mt-1 space-y-0.5 text-xs text-zinc-400">
+          <p className="font-mono">
+            smb://{p.host}:{p.port || 445}/{p.smbShare}
+            {p.remotePath ? `/${String(p.remotePath).replace(/^\/+/, '')}` : ''}
+          </p>
+          <p>
+            User: {p.username || 'guest'}
+            {p.smbDomain ? ` · Domain: ${p.smbDomain}` : ''}
+          </p>
+        </div>
+      )
+    }
+    if (p.type === 'nfs') {
+      return (
+        <div className="mt-1 space-y-0.5 text-xs text-zinc-400">
+          <p className="font-mono">
+            nfs://{p.host}
+            {p.nfsExport}
+            {p.remotePath ? `/${String(p.remotePath).replace(/^\/+/, '')}` : ''}
+          </p>
+          <p>
+            UID/GID: {p.nfsUid ?? 0}:{p.nfsGid ?? 0}
+          </p>
+        </div>
+      )
+    }
     return (
       <div className="mt-1 space-y-0.5 text-xs text-zinc-400">
         <p className="font-mono">
@@ -537,6 +625,7 @@ export function Settings({
   function renderProviderIcon(type) {
     if (type === 's3') return <Cloud className="h-5 w-5" />
     if (type === 'azure') return <Container className="h-5 w-5" />
+    if (type === 'ssh' || type === 'smb' || type === 'nfs') return <Server className="h-5 w-5" />
     return <HardDrive className="h-5 w-5" />
   }
 
@@ -599,7 +688,7 @@ export function Settings({
               <div>
                 <h2 className="text-lg font-semibold text-zinc-100">Storage Destinations</h2>
                 <p className="text-xs text-zinc-400">
-                  Configure local disks, Azure Blob Storage, and S3-compatible buckets with optional AES-256-GCM encryption
+                  Configure local disks, S3, Azure Blob, SSH/SFTP, SMB/CIFS shares, and NFS exports with optional AES-256-GCM encryption
                 </p>
               </div>
               <Button onClick={openCreate}>
@@ -1054,7 +1143,7 @@ export function Settings({
         open={modalOpen}
         onClose={() => setModalOpen(false)}
         title={editing ? 'Edit Storage Provider' : 'Add Storage Provider'}
-        subtitle="Configure local disk, Azure Blob Storage, or S3-compatible object storage"
+        subtitle="Configure local disk, S3, Azure Blob, SSH/SFTP, SMB share, or NFS export"
         maxWidth="max-w-xl"
       >
         <form onSubmit={handleSave} className="space-y-4 max-h-[80vh] overflow-y-auto pr-1">
@@ -1065,7 +1154,17 @@ export function Settings({
                 id="sp-name"
                 value={form.name}
                 onChange={(e) => setForm({ ...form, name: e.target.value })}
-                placeholder={form.type === 'azure' ? 'Azure Offsite Vault' : 'MinIO NAS'}
+                placeholder={
+                  form.type === 'azure'
+                    ? 'Azure Offsite Vault'
+                    : form.type === 'ssh'
+                      ? 'Offsite Storage Box'
+                      : form.type === 'smb'
+                        ? 'TrueNAS SMB Share'
+                        : form.type === 'nfs'
+                          ? 'Synology NFS Export'
+                          : 'MinIO NAS'
+                }
                 required
               />
             </div>
@@ -1075,10 +1174,21 @@ export function Settings({
                 id="sp-type"
                 value={form.type}
                 disabled={Boolean(editing)}
-                onChange={(e) => setForm({ ...form, type: e.target.value })}
+                onChange={(e) => {
+                  const nextType = e.target.value
+                  const defaultPorts = { ssh: '22', smb: '445', nfs: '2049' }
+                  setForm((prev) => ({
+                    ...prev,
+                    type: nextType,
+                    port: defaultPorts[nextType] || '',
+                  }))
+                }}
               >
                 <option value="s3">S3 Compatible</option>
                 <option value="azure">Azure Blob Storage</option>
+                <option value="ssh">SSH / SFTP</option>
+                <option value="smb">SMB / CIFS Share</option>
+                <option value="nfs">NFS Export</option>
                 <option value="local">Local Disk</option>
               </Select>
             </div>
@@ -1338,6 +1448,296 @@ export function Settings({
                   onChange={(val) => setForm({ ...form, azureAutoCreateContainer: val })}
                 />
               </div>
+            </div>
+          )}
+
+          {form.type === 'ssh' && (
+            <div className="space-y-3">
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                <div className="sm:col-span-2">
+                  <Label htmlFor="ssh-host">SSH Host / IP</Label>
+                  <Input
+                    id="ssh-host"
+                    value={form.host}
+                    onChange={(e) => setForm({ ...form, host: e.target.value })}
+                    placeholder="nas.local or u12345.your-storagebox.de"
+                    className="font-mono"
+                    required
+                  />
+                </div>
+                <div>
+                  <Label htmlFor="ssh-port">Port</Label>
+                  <Input
+                    id="ssh-port"
+                    type="number"
+                    min="1"
+                    max="65535"
+                    value={form.port}
+                    onChange={(e) => setForm({ ...form, port: e.target.value })}
+                    placeholder="22"
+                    className="font-mono"
+                  />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <Label htmlFor="ssh-user">Username</Label>
+                  <Input
+                    id="ssh-user"
+                    value={form.username}
+                    onChange={(e) => setForm({ ...form, username: e.target.value })}
+                    placeholder="dockvault"
+                    className="font-mono"
+                    required
+                  />
+                </div>
+                <div>
+                  <Label htmlFor="ssh-path">Remote Directory Path</Label>
+                  <Input
+                    id="ssh-path"
+                    value={form.remotePath}
+                    onChange={(e) => setForm({ ...form, remotePath: e.target.value })}
+                    placeholder="/backups/dockvault or dockvault"
+                    className="font-mono"
+                  />
+                </div>
+              </div>
+
+              <div className="flex items-center justify-between gap-3 rounded-xl border border-zinc-800 bg-zinc-950/50 px-3.5 py-2.5">
+                <div className="pr-2">
+                  <div className="text-xs text-zinc-200">
+                    Use local SSH key from DockVault container
+                  </div>
+                  <p className="text-[11px] text-zinc-400">
+                    Reads an existing private key mounted into the container (auto-detects{' '}
+                    <span className="font-mono text-zinc-300">~/.ssh/id_ed25519</span>,{' '}
+                    <span className="font-mono text-zinc-300">id_ecdsa</span>,{' '}
+                    <span className="font-mono text-zinc-300">id_rsa</span> or uses a custom path).
+                  </p>
+                </div>
+                <Switch
+                  checked={form.sshUseLocalKey}
+                  onChange={(val) => setForm({ ...form, sshUseLocalKey: val })}
+                />
+              </div>
+
+              {form.sshUseLocalKey ? (
+                <div>
+                  <Label htmlFor="ssh-key-path">
+                    Container Key Path (optional — leave blank to auto-detect)
+                  </Label>
+                  <Input
+                    id="ssh-key-path"
+                    value={form.sshKeyPath}
+                    onChange={(e) => setForm({ ...form, sshKeyPath: e.target.value })}
+                    placeholder="/root/.ssh/id_ed25519"
+                    className="font-mono"
+                  />
+                </div>
+              ) : (
+                <div>
+                  <Label htmlFor="ssh-key">
+                    SSH Private Key (PEM / OpenSSH){' '}
+                    {editing?.hasSshPrivateKey ? '(leave blank to keep)' : '(optional if using password)'}
+                  </Label>
+                  <textarea
+                    id="ssh-key"
+                    rows={4}
+                    value={form.sshPrivateKey}
+                    onChange={(e) => setForm({ ...form, sshPrivateKey: e.target.value })}
+                    placeholder="-----BEGIN OPENSSH PRIVATE KEY-----&#10;..."
+                    className="w-full rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2 font-mono text-xs text-zinc-100 placeholder-zinc-600 focus:border-sky-500 focus:outline-none"
+                  />
+                </div>
+              )}
+
+              <div>
+                <Label htmlFor="ssh-pass">
+                  Password {editing?.hasPassword ? '(leave blank to keep)' : '(optional if using SSH key)'}
+                </Label>
+                <Input
+                  id="ssh-pass"
+                  type="password"
+                  value={form.password}
+                  onChange={(e) => setForm({ ...form, password: e.target.value })}
+                  placeholder="SSH password"
+                />
+              </div>
+
+              <div>
+                <Label htmlFor="ssh-key-pass">
+                  Private Key Passphrase{' '}
+                  {editing?.hasSshKeyPassphrase ? '(leave blank to keep)' : '(optional)'}
+                </Label>
+                <Input
+                  id="ssh-key-pass"
+                  type="password"
+                  value={form.sshKeyPassphrase}
+                  onChange={(e) => setForm({ ...form, sshKeyPassphrase: e.target.value })}
+                  placeholder="Only required for encrypted private keys"
+                />
+              </div>
+            </div>
+          )}
+
+          {form.type === 'smb' && (
+            <div className="space-y-3">
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                <div className="sm:col-span-2">
+                  <Label htmlFor="smb-host">SMB Server Host / IP</Label>
+                  <Input
+                    id="smb-host"
+                    value={form.host}
+                    onChange={(e) => setForm({ ...form, host: e.target.value })}
+                    placeholder="192.168.1.50 or truenas.local"
+                    className="font-mono"
+                    required
+                  />
+                </div>
+                <div>
+                  <Label htmlFor="smb-port">Port</Label>
+                  <Input
+                    id="smb-port"
+                    type="number"
+                    min="1"
+                    max="65535"
+                    value={form.port}
+                    onChange={(e) => setForm({ ...form, port: e.target.value })}
+                    placeholder="445"
+                    className="font-mono"
+                  />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <Label htmlFor="smb-share">Share Name</Label>
+                  <Input
+                    id="smb-share"
+                    value={form.smbShare}
+                    onChange={(e) => setForm({ ...form, smbShare: e.target.value })}
+                    placeholder="backups"
+                    className="font-mono"
+                    required
+                  />
+                </div>
+                <div>
+                  <Label htmlFor="smb-path">Subdirectory (optional)</Label>
+                  <Input
+                    id="smb-path"
+                    value={form.remotePath}
+                    onChange={(e) => setForm({ ...form, remotePath: e.target.value })}
+                    placeholder="dockvault"
+                    className="font-mono"
+                  />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                <div>
+                  <Label htmlFor="smb-user">Username</Label>
+                  <Input
+                    id="smb-user"
+                    value={form.username}
+                    onChange={(e) => setForm({ ...form, username: e.target.value })}
+                    placeholder="backup (or blank for guest)"
+                    className="font-mono"
+                  />
+                </div>
+                <div>
+                  <Label htmlFor="smb-pass">
+                    Password {editing?.hasPassword ? '(leave blank to keep)' : ''}
+                  </Label>
+                  <Input
+                    id="smb-pass"
+                    type="password"
+                    value={form.password}
+                    onChange={(e) => setForm({ ...form, password: e.target.value })}
+                    placeholder="SMB password"
+                  />
+                </div>
+                <div>
+                  <Label htmlFor="smb-domain">Domain (optional)</Label>
+                  <Input
+                    id="smb-domain"
+                    value={form.smbDomain}
+                    onChange={(e) => setForm({ ...form, smbDomain: e.target.value })}
+                    placeholder="WORKGROUP"
+                    className="font-mono"
+                  />
+                </div>
+              </div>
+            </div>
+          )}
+
+          {form.type === 'nfs' && (
+            <div className="space-y-3">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <Label htmlFor="nfs-host">NFS Server Host / IP</Label>
+                  <Input
+                    id="nfs-host"
+                    value={form.host}
+                    onChange={(e) => setForm({ ...form, host: e.target.value })}
+                    placeholder="192.168.1.60 or synology.local"
+                    className="font-mono"
+                    required
+                  />
+                </div>
+                <div>
+                  <Label htmlFor="nfs-export">Export Path</Label>
+                  <Input
+                    id="nfs-export"
+                    value={form.nfsExport}
+                    onChange={(e) => setForm({ ...form, nfsExport: e.target.value })}
+                    placeholder="/volume1/backups"
+                    className="font-mono"
+                    required
+                  />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                <div>
+                  <Label htmlFor="nfs-subpath">Subdirectory (optional)</Label>
+                  <Input
+                    id="nfs-subpath"
+                    value={form.remotePath}
+                    onChange={(e) => setForm({ ...form, remotePath: e.target.value })}
+                    placeholder="dockvault"
+                    className="font-mono"
+                  />
+                </div>
+                <div>
+                  <Label htmlFor="nfs-uid">AUTH_UNIX UID</Label>
+                  <Input
+                    id="nfs-uid"
+                    type="number"
+                    min="0"
+                    value={form.nfsUid}
+                    onChange={(e) => setForm({ ...form, nfsUid: e.target.value })}
+                    placeholder="0"
+                    className="font-mono"
+                  />
+                </div>
+                <div>
+                  <Label htmlFor="nfs-gid">AUTH_UNIX GID</Label>
+                  <Input
+                    id="nfs-gid"
+                    type="number"
+                    min="0"
+                    value={form.nfsGid}
+                    onChange={(e) => setForm({ ...form, nfsGid: e.target.value })}
+                    placeholder="0"
+                    className="font-mono"
+                  />
+                </div>
+              </div>
+
+              <p className="text-[11px] text-zinc-400">
+                Uses user-space NFSv3 (no host mount or <span className="font-mono text-zinc-300">CAP_SYS_ADMIN</span> required). Ensure NFS portmapper (<span className="font-mono text-zinc-300">111</span>) is reachable and enable the <span className="font-mono text-zinc-300">insecure</span> export option on your NAS if connecting from unprivileged container ports.
+              </p>
             </div>
           )}
 

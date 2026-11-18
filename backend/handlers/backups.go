@@ -20,6 +20,7 @@ import (
 	"github.com/muecahit94/dockvault/docker"
 	"github.com/muecahit94/dockvault/models"
 	"github.com/muecahit94/dockvault/storage"
+	"gorm.io/gorm"
 )
 
 type runBackupPayload struct {
@@ -60,8 +61,24 @@ func (s *Server) ListBackups(c *fiber.Ctx) error {
 		})
 	}
 
+	restoreState := computeRestoreState(s.db, 200)
 	return c.JSON(fiber.Map{
-		"backups": logs,
+		"backups":         logs,
+		"restores":        restoreState.Restores,
+		"activeRollbacks": restoreState.ActiveRollbacks,
+	})
+}
+
+// ListRestores returns recorded restore / rollback events ordered newest-first alongside active rollback states.
+func (s *Server) ListRestores(c *fiber.Ctx) error {
+	limit := c.QueryInt("limit", 100)
+	if limit <= 0 || limit > 500 {
+		limit = 100
+	}
+	restoreState := computeRestoreState(s.db, limit)
+	return c.JSON(fiber.Map{
+		"restores":        restoreState.Restores,
+		"activeRollbacks": restoreState.ActiveRollbacks,
 	})
 }
 
@@ -641,4 +658,115 @@ func (s *Server) deleteBackupByID(ctx context.Context, id uint, deleteFile bool)
 		return fiber.StatusInternalServerError, err
 	}
 	return 0, nil
+}
+
+type restoreStateSummary struct {
+	Restores        []models.RestoreLog
+	ActiveByTarget  map[string]models.RestoreLog
+	LatestByTarget  map[string]models.RestoreLog
+	ActiveRollbacks []models.RestoreLog
+}
+
+// computeRestoreState loads recent restore events and determines which targets currently
+// remain rolled back to a restored backup version (no newer non-pre-restore backup after restore).
+func computeRestoreState(db *gorm.DB, limit int) restoreStateSummary {
+	out := restoreStateSummary{
+		ActiveByTarget: make(map[string]models.RestoreLog),
+		LatestByTarget: make(map[string]models.RestoreLog),
+	}
+	if db == nil {
+		return out
+	}
+
+	db.Order("restored_at desc, id desc").Limit(limit).Find(&out.Restores)
+	if len(out.Restores) == 0 {
+		return out
+	}
+
+	type targetBackupTime struct {
+		TargetType string
+		TargetName string
+		StartedAt  time.Time
+	}
+	var recentBackups []targetBackupTime
+	db.Model(&models.BackupLog{}).
+		Select("target_type, target_name, started_at").
+		Where("status = ? AND trigger <> ?", "success", "pre-restore").
+		Order("started_at desc, id desc").
+		Limit(500).
+		Scan(&recentBackups)
+
+	latestBackupAt := make(map[string]time.Time, len(recentBackups))
+	for _, b := range recentBackups {
+		key := b.TargetType + ":" + b.TargetName
+		if _, seen := latestBackupAt[key]; !seen {
+			latestBackupAt[key] = b.StartedAt
+		}
+	}
+
+	checkedInPlace := make(map[string]bool)
+	for _, r := range out.Restores {
+		key := r.TargetType + ":" + r.TargetName
+		if _, seen := out.LatestByTarget[key]; !seen {
+			out.LatestByTarget[key] = r
+		}
+		if r.Status == "success" && r.Mode == "inplace" && !checkedInPlace[key] {
+			checkedInPlace[key] = true
+			newerBackupAt, hasBackup := latestBackupAt[key]
+			if !hasBackup || !newerBackupAt.After(r.RestoredAt) {
+				out.ActiveByTarget[key] = r
+				out.ActiveRollbacks = append(out.ActiveRollbacks, r)
+			}
+		}
+	}
+	return out
+}
+
+func resolveTargetRestore(
+	targetType, targetName, composeProject string,
+	state restoreStateSummary,
+) *docker.RestoreSummary {
+	key := targetType + ":" + targetName
+	var chosen *models.RestoreLog
+	isActive := false
+
+	if act, ok := state.ActiveByTarget[key]; ok {
+		c := act
+		chosen = &c
+		isActive = true
+	} else if targetType == "container" && composeProject != "" {
+		if stackAct, ok := state.ActiveByTarget["stack:"+composeProject]; ok {
+			c := stackAct
+			chosen = &c
+			isActive = true
+		}
+	}
+
+	if chosen == nil {
+		if latest, ok := state.LatestByTarget[key]; ok {
+			c := latest
+			chosen = &c
+		} else if targetType == "container" && composeProject != "" {
+			if stackLatest, ok := state.LatestByTarget["stack:"+composeProject]; ok {
+				c := stackLatest
+				chosen = &c
+			}
+		}
+	}
+
+	if chosen == nil {
+		return nil
+	}
+	return &docker.RestoreSummary{
+		RestoreID:        chosen.ID,
+		BackupLogID:      chosen.BackupLogID,
+		BackupFileName:   chosen.BackupFileName,
+		BackupStartedAt:  chosen.BackupStartedAt,
+		Mode:             chosen.Mode,
+		TargetVolume:     chosen.TargetVolume,
+		RestoredPaths:    chosen.RestoredPaths,
+		Status:           chosen.Status,
+		RestoredAt:       chosen.RestoredAt,
+		IsActiveRollback: isActive,
+	}
 }

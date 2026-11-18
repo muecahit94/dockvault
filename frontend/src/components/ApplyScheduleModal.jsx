@@ -25,7 +25,15 @@ export function ApplyScheduleModal({ open, onClose, source, schedules, stacks, c
   }, [open, source?.id])
 
   const scheduledKeys = useMemo(
-    () => new Set(schedules.map((s) => targetKey(s.targetType, s.targetId))),
+    () =>
+      new Set(
+        schedules.flatMap((s) => {
+          const targets = s.targets?.length
+            ? s.targets
+            : [{ targetType: s.targetType, targetId: s.targetId }]
+          return targets.map((t) => targetKey(t.targetType, t.targetId))
+        }),
+      ),
     [schedules],
   )
 

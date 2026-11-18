@@ -125,6 +125,12 @@ export const api = {
       body: JSON.stringify(payload),
     })
   },
+  getRestores: (params = {}) => {
+    const qs = new URLSearchParams()
+    if (params.limit) qs.set('limit', params.limit)
+    const suffix = qs.toString() ? `?${qs.toString()}` : ''
+    return request(`/restores${suffix}`)
+  },
   getBackupProgress: (id) => request(`/backups/${id}/progress`),
   backupEventsUrl: () => `${API_BASE}/backups/events`,
   downloadBackupUrl: (id, raw = false) =>

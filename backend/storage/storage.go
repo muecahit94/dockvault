@@ -4,8 +4,12 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net"
+	"path"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/muecahit94/dockvault/models"
@@ -64,9 +68,77 @@ func NewDriver(provider models.StorageProvider, defaultBackupDir string) (Driver
 		return NewS3Driver(provider)
 	case "azure":
 		return NewAzureDriver(provider)
+	case "ssh":
+		return NewSSHDriver(provider)
+	case "smb":
+		return NewSMBDriver(provider)
+	case "nfs":
+		return NewNFSDriver(provider)
 	default:
 		return nil, fmt.Errorf("unsupported storage provider type %q", provider.Type)
 	}
+}
+
+// wrappedReadCloser closes the underlying stream and tears down remote session handles once.
+type wrappedReadCloser struct {
+	io.ReadCloser
+	once    sync.Once
+	cleanup func()
+}
+
+func (w *wrappedReadCloser) Close() error {
+	err := w.ReadCloser.Close()
+	w.once.Do(func() {
+		if w.cleanup != nil {
+			w.cleanup()
+		}
+	})
+	return err
+}
+
+func parseHostPort(rawHost string, explicitPort, defaultPort int) (string, int, error) {
+	host := strings.TrimSpace(rawHost)
+	if host == "" {
+		return "", 0, fmt.Errorf("host is required")
+	}
+	port := explicitPort
+	if h, pStr, err := net.SplitHostPort(host); err == nil {
+		host = strings.TrimSpace(h)
+		if port <= 0 {
+			parsed, convErr := strconv.Atoi(pStr)
+			if convErr != nil || parsed <= 0 || parsed > 65535 {
+				return "", 0, fmt.Errorf("invalid port %q", pStr)
+			}
+			port = parsed
+		}
+	} else {
+		host = strings.TrimPrefix(strings.TrimSuffix(host, "]"), "[")
+	}
+	if port <= 0 {
+		port = defaultPort
+	}
+	if port > 65535 {
+		return "", 0, fmt.Errorf("invalid port %d", port)
+	}
+	return host, port, nil
+}
+
+func cleanRemoteSubdir(raw string) (string, error) {
+	trimmed := strings.TrimSpace(strings.ReplaceAll(raw, `\`, `/`))
+	trimmed = strings.Trim(trimmed, "/")
+	if trimmed == "" || trimmed == "." {
+		return "", nil
+	}
+	for _, seg := range strings.Split(trimmed, "/") {
+		if seg == ".." {
+			return "", fmt.Errorf("remote path %q must not contain '..'", raw)
+		}
+	}
+	cleaned := path.Clean(trimmed)
+	if cleaned == "." || cleaned == ".." || strings.HasPrefix(cleaned, "../") {
+		return "", fmt.Errorf("invalid remote path %q", raw)
+	}
+	return cleaned, nil
 }
 
 // SafeFileName strips directory components and rejects traversal attempts.
