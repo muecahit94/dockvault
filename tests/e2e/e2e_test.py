@@ -27,6 +27,8 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+from e2e_ui import Suite
+
 BASE = os.environ.get("DOCKVAULT_E2E_URL", "http://127.0.0.1:18088/api").rstrip("/")
 WEB_URL = os.environ.get("DOCKVAULT_E2E_WEB_URL", "http://127.0.0.1:18088/")
 PREFIX = os.environ.get("DOCKVAULT_E2E_PREFIX", "dv-e2e")
@@ -118,8 +120,18 @@ def vol_exec(volume_name, sh_cmd):
 
 
 def run_tests():
+    suite = Suite("Core E2E Suite", 12)
+    try:
+        _run_scenarios(suite)
+    except Exception:
+        suite.fail()
+        raise
+    suite.finish()
+
+
+def _run_scenarios(suite):
     # 1. Discovery, Stacks, Socket Filtering, Excluded Containers, Orphans & GitOps Sync
-    print("[1/12] Testing discovery (containers, stacks, orphans, socket filter, exclude label, GitOps sync)...")
+    suite.begin(1, "Discovery, stacks, orphans & GitOps sync")
     _, cdata = req("GET", "/containers")
     containers = {c["name"]: c for c in cdata["containers"]}
     assert APP_CONTAINER in containers, f"{APP_CONTAINER} missing"
@@ -157,10 +169,10 @@ def run_tests():
     ]
     assert len(gitops_scheds) == 1, f"expected 1 GitOps schedule on startup, got {gitops_scheds}"
     req("POST", "/schedules/sync-labels", {})
-    print("  PASS: discovery, stack grouping, docker.sock guard, exclude label, orphans & GitOps sync")
+    suite.ok()
 
     # 2. Embedded SPA Root + SSE Live Progress Stream
-    print("[2/12] Testing embedded SPA frontend & SSE /api/backups/events stream...")
+    suite.begin(2, "Embedded SPA root & live SSE progress stream")
     with urllib.request.urlopen(WEB_URL, timeout=5) as resp:
         html = resp.read().decode("utf-8", errors="replace")
         assert resp.status == 200 and "<html" in html.lower() and "dockvault" in html.lower(), "embedded SPA failed to load"
@@ -171,10 +183,10 @@ def run_tests():
         assert event_line.strip() == "event: progress", f"unexpected SSE event: {event_line!r}"
         payload = json.loads(data_line[len("data:"):].strip())
         assert "jobs" in payload
-    print("  PASS: embedded SPA responds HTTP 200 & SSE emits valid progress events")
+    suite.ok()
 
     # 3. zstd Backup (Volume + Bind Mount), Socket Omission, Excludes, Hooks, Verify, Staging & Pre-Restore Snapshot
-    print("[3/12] Testing zstd backup, bind mount, socket safety, hooks, staging & pre-restore snapshot...")
+    suite.begin(3, "zstd backup, hooks, excludes, staging & snapshot restore")
     _, storage_data = req("GET", "/storage")
     local_id = storage_data["providers"][0]["id"]
 
@@ -232,10 +244,10 @@ def run_tests():
     pre_data_path = next(e["name"] for e in pre_insp["entries"] if e["name"].endswith("data.txt"))
     _, pre_data_bytes = req("GET", f"/backups/{pre_id}/file?path={urllib.parse.quote(pre_data_path)}")
     assert pre_data_bytes.decode("utf-8").strip() == "corrupted-v2"
-    print("  PASS: zstd, bind mount, socket safety, hooks, inspect, extract, verify, staging & pre-restore snapshot")
+    suite.ok()
 
     # 4. Compose Stack Backup & Multi-Volume Stack Restore
-    print("[4/12] Testing multi-container Compose stack backup & stack restore...")
+    suite.begin(4, "Compose stack backup & multi-volume restore")
     _, st_run = req("POST", "/backups/run", {
         "targetType": "stack",
         "targetId": STACK_NAME,
@@ -254,10 +266,10 @@ def run_tests():
     req("POST", f"/backups/{b_stack['id']}/restore", {"pauseContainer": True})
     assert vol_exec(WEB_VOL, "cat /vol/index.html") == "<h1>web-v1</h1>"
     assert vol_exec(API_VOL, "cat /vol/state.json") == '{"version":1}'
-    print("  PASS: Compose stack backup & multi-volume restore verified")
+    suite.ok()
 
     # 5. Encrypted Storage (.tar.zst.enc), Unsaved Storage Test, Raw DVENC1 Download & 3-2-1 Replication
-    print("[5/12] Testing AES-256-GCM encryption, raw vs decrypted download, & 3-2-1 secondary replication...")
+    suite.begin(5, "AES-256-GCM encryption, DVENC1 raw & 3-2-1 replication")
     st_bad, _ = req("POST", "/storage/test", {
         "name": "Bad Probe",
         "type": "s3",
@@ -318,10 +330,10 @@ def run_tests():
         ["docker", "exec", DOCKVAULT_C, "ls", "/app/backups/encrypted"], text=True
     ).splitlines()
     assert any(f.endswith(".tar.gz.enc") for f in enc_files), f"expected replicated .tar.gz.enc file: {enc_files}"
-    print("  PASS: AES-256-GCM encryption, DVENC1 raw/decrypted download, orphan restore, & 3-2-1 replication")
+    suite.ok()
 
     # 6. Zero-Downtime Redis DB Hot Dump
-    print("[6/12] Testing zero-downtime Redis DB hot dump...")
+    suite.begin(6, "Zero-downtime Redis DB hot dump")
     _, db_run = req("POST", "/backups/run", {
         "targetType": "container",
         "targetId": REDIS_CONTAINER,
@@ -336,10 +348,10 @@ def run_tests():
     assert len(rdb_entries) == 1 and rdb_entries[0]["size"] > 0
     r_val = subprocess.check_output(["docker", "exec", REDIS_CONTAINER, "redis-cli", "GET", "e2e:key1"], text=True).strip()
     assert r_val == "hello-dockvault"
-    print(f"  PASS: Redis hot dump appended {rdb_entries[0]['name']} ({rdb_entries[0]['size']} bytes) zero-downtime")
+    suite.ok(f"{rdb_entries[0]['name']} ({rdb_entries[0]['size']} B)")
 
     # 7. Schedule Lifecycle: Preview, Create, Retention Keep-2 + Pin Protection, Clone, Toggle & Delete
-    print("[7/12] Testing schedule lifecycle (preview, create, Keep-N retention + pin protection, clone, toggle, delete)...")
+    suite.begin(7, "Schedule lifecycle, Keep-N retention & pin protection")
     _, prev_ok = req("POST", "/schedules/preview", {"cronExpr": "0 3 * * *"})
     assert prev_ok["valid"] is True and prev_ok.get("nextRunAt")
     st_bad_cron, _ = req("POST", "/schedules/preview", {"cronExpr": "not a cron"}, expect_statuses={400})
@@ -394,10 +406,10 @@ def run_tests():
     req("DELETE", f"/schedules/{paused_copy_id}")
     req("DELETE", f"/schedules/{applied_id}")
     req("DELETE", f"/schedules/{ret_sched['id']}")
-    print("  PASS: cron preview, Keep-2 pruning + pin protection, schedule clone, toggle, & delete")
+    suite.ok()
 
     # 8. Disaster Recovery: Scan & Import Existing Archives
-    print("[8/12] Testing disaster recovery Scan & Import (POST /api/storage/:id/scan & /import)...")
+    suite.begin(8, "Disaster recovery scan & import")
     req("DELETE", f"/backups/{b_stack['id']}?deleteFile=false")
     _, scan_res = req("POST", f"/storage/{local_id}/scan", {})
     unimported = [o for o in scan_res["objects"] if o["storagePath"] == b_stack["storagePath"]]
@@ -408,10 +420,10 @@ def run_tests():
     _, after_imp = req("GET", f"/backups?target={urllib.parse.quote(STACK_NAME)}&limit=10")
     reimported = [b for b in after_imp["backups"] if b["fileName"] == b_stack["fileName"]]
     assert len(reimported) == 1 and reimported[0]["trigger"] == "imported"
-    print("  PASS: metadata deleted safely (?deleteFile=false), scanned, & re-imported into History")
+    suite.ok()
 
     # 9. Notes, Snapshot Compare, Bulk Verify/Delete, & Selective Path Restore
-    print("[9/12] Testing backup notes, snapshot compare, bulk verify/delete, & selective restore...")
+    suite.begin(9, "Notes, snapshot compare, bulk ops & selective restore")
     _, note_res = req("PUT", f"/backups/{b1['id']}/note", {"note": "Golden pre-migration baseline"})
     assert note_res["backup"]["note"] == "Golden pre-migration baseline"
 
@@ -433,18 +445,18 @@ def run_tests():
     req("POST", f"/backups/{pinned_id}/pin", {})
     _, bulk_del = req("POST", "/backups/bulk", {"action": "delete", "ids": [pinned_id]})
     assert bulk_del["succeeded"] == 1
-    print("  PASS: notes, archive compare, bulk verify/delete, & selective single-path restore")
+    suite.ok()
 
     # 10. Volume Deletion Safety (In-Use Guard vs Unattached Orphan Delete)
-    print("[10/12] Testing volume deletion safety (reject in-use, allow unattached orphan)...")
+    suite.begin(10, "Volume deletion guard (in-use 409 vs orphan 200)")
     st_inuse, _ = req("DELETE", f"/volumes/{APP_VOL}", expect_statuses={400, 409})
     assert st_inuse in (400, 409), f"expected conflict deleting in-use volume, got {st_inuse}"
     _, del_vol_res = req("DELETE", f"/volumes/{DELETE_VOL}")
     assert del_vol_res.get("deleted") is True
-    print("  PASS: in-use volume protected (409), orphan volume deleted cleanly")
+    suite.ok()
 
     # 11. Notifications Webhook Delivery & UI Preferences Round-Trip
-    print("[11/12] Testing webhook notification delivery & UI preferences persistence...")
+    suite.begin(11, "Webhook notification delivery & UI preferences")
     received_webhooks = []
 
     class WebhookHandler(http.server.BaseHTTPRequestHandler):
@@ -496,10 +508,10 @@ def run_tests():
     assert pref_upd["preferences"]["instanceName"] == "e2e-node"
     _, pref_rst = req("POST", "/settings/preferences/reset", {})
     assert pref_rst["preferences"]["instanceName"] == ""
-    print("  PASS: webhook HTTP delivery verified inside Docker network & UI preferences persisted/reset")
+    suite.ok()
 
     # 12. Authentication Lifecycle + Dashboard Analytics Verification (while signed in)
-    print("[12/12] Testing auth setup, 401 guard, wrong-password rejection, login cookie, analytics & logout...")
+    suite.begin(12, "Auth setup, 401 guard, login, analytics & logout")
     req("POST", "/auth/setup", {"username": "e2eadmin", "password": "StrongPassword123!"})
     cookie_jar.clear()
 
@@ -525,9 +537,7 @@ def run_tests():
     cookie_jar.clear()
     st_after_logout, _ = req("GET", "/dashboard", expect_statuses={401}, use_cookies=False)
     assert st_after_logout == 401
-    print("  PASS: auth 401 guard, login session cookie, dashboard analytics/security overview, & logout")
-
-    print("\nALL 12 E2E DOCKER SCENARIOS PASSED!")
+    suite.ok()
 
 
 if __name__ == "__main__":

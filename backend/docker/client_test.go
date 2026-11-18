@@ -127,7 +127,7 @@ func TestCopyTarAndAppendDB(t *testing.T) {
 		}
 		seen = append(seen, hdr.Name)
 	}
-	if len(seen) != 3 || seen[0] != "vol_data/file.txt" || seen[2] != "db_dumps/pg-postgres.sql" {
+	if len(seen) != 3 || seen[0] != "db_dumps/" || seen[1] != "db_dumps/pg-postgres.sql" || seen[2] != "vol_data/file.txt" {
 		t.Fatalf("unexpected tar entries: %+v", seen)
 	}
 }

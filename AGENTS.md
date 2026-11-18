@@ -110,7 +110,10 @@ cd frontend && npm run dev
 ```bash
 docker compose config -q
 docker build --build-arg VERSION=0.1.0 -t dockvault:local .
-./tests/e2e/run_e2e.sh
+./tests/e2e/run_e2e.sh            # 12 core scenarios
+./tests/e2e/run_db_e2e.sh         # PostgreSQL, MariaDB & Redis backup + restore + R/W verification
+./tests/e2e/run_edge_e2e.sh       # Chaos, security, Azurite Azure Blob, SeaweedFS S3 & edge cases
+./tests/e2e/run_e2e.sh --all      # Full pre-push core + database + edge/cloud suites
 ```
 
 ---
