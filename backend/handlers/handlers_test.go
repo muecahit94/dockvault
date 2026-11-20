@@ -1107,10 +1107,10 @@ func TestMultiTargetScheduleCRUDAndCoverage(t *testing.T) {
 		"name":              "Homelab Nightly",
 		"cronExpr":          "0 2 * * *",
 		"storageProviderId": localProv.ID,
-		"targets": []map[string]string{
-			{"targetType": "stack", "targetId": "media-stack", "targetName": "media-stack"},
+		"targets": []map[string]any{
+			{"targetType": "stack", "targetId": "media-stack", "targetName": "media-stack", "selectedMounts": []string{"jellyfin_config"}},
 			{"targetType": "stack", "targetId": "pg-stack", "targetName": "pg-stack"},
-			{"targetType": "container", "targetId": "vaultwarden", "targetName": "vaultwarden"},
+			{"targetType": "container", "targetId": "vaultwarden", "targetName": "vaultwarden", "selectedMounts": []string{"vw_data", "vw_data"}},
 		},
 	})
 	if resp.StatusCode != http.StatusCreated {
@@ -1129,6 +1129,12 @@ func TestMultiTargetScheduleCRUDAndCoverage(t *testing.T) {
 	}
 	if createEnvelope.Schedule.TargetType != "multi" || len(createEnvelope.Schedule.Targets) != 3 {
 		t.Fatalf("expected multi-target schedule with 3 targets, got %+v", createEnvelope.Schedule)
+	}
+	if got := createEnvelope.Schedule.Targets[0].SelectedMounts; len(got) != 1 || got[0] != "jellyfin_config" {
+		t.Fatalf("expected selectedMounts on target 0, got %+v", got)
+	}
+	if got := createEnvelope.Schedule.Targets[2].SelectedMounts; len(got) != 1 || got[0] != "vw_data" {
+		t.Fatalf("expected deduplicated selectedMounts on target 2, got %+v", got)
 	}
 
 	// Verify buildScheduleCoverage recognizes all stacks & containers in the schedule.

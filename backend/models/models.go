@@ -152,9 +152,31 @@ func (s StorageProvider) ToDTO() StorageProviderDTO {
 
 // ScheduleTarget identifies one Compose stack, container, or Docker volume included in a schedule.
 type ScheduleTarget struct {
-	TargetType string `json:"targetType"` // "container", "stack", or "volume"
-	TargetID   string `json:"targetId"`
-	TargetName string `json:"targetName"`
+	TargetType     string   `json:"targetType"` // "container", "stack", or "volume"
+	TargetID       string   `json:"targetId"`
+	TargetName     string   `json:"targetName"`
+	SelectedMounts []string `json:"selectedMounts,omitempty"` // empty means include all backupable mounts
+}
+
+// NormalizeMountSelections trims and deduplicates mount/volume filters while preserving order.
+func NormalizeMountSelections(raw []string) []string {
+	if len(raw) == 0 {
+		return nil
+	}
+	seen := make(map[string]bool, len(raw))
+	out := make([]string, 0, len(raw))
+	for _, item := range raw {
+		trimmed := strings.TrimSpace(item)
+		if trimmed == "" || seen[trimmed] {
+			continue
+		}
+		seen[trimmed] = true
+		out = append(out, trimmed)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // BackupSchedule defines a recurring cron backup job for one or more containers, stacks, or volumes.
@@ -227,10 +249,15 @@ func (s BackupSchedule) ResolvedTargets() []ScheduleTarget {
 			continue
 		}
 		seen[key] = true
+		var mounts []string
+		if tType != "volume" {
+			mounts = NormalizeMountSelections(t.SelectedMounts)
+		}
 		out = append(out, ScheduleTarget{
-			TargetType: tType,
-			TargetID:   tID,
-			TargetName: tName,
+			TargetType:     tType,
+			TargetID:       tID,
+			TargetName:     tName,
+			SelectedMounts: mounts,
 		})
 	}
 	return out

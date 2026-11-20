@@ -17,6 +17,7 @@ type schedulePayload struct {
 	TargetType         string                  `json:"targetType"`
 	TargetID           string                  `json:"targetId"`
 	TargetName         string                  `json:"targetName"`
+	SelectedMounts     []string                `json:"selectedMounts"`
 	Targets            []models.ScheduleTarget `json:"targets"`
 	CronExpr           string                  `json:"cronExpr"`
 	StorageProviderID  uint   `json:"storageProviderId"`
@@ -92,7 +93,7 @@ func (s *Server) CreateSchedule(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid JSON body"})
 	}
 
-	targets, err := normalizeScheduleTargets(body.TargetType, body.TargetID, body.TargetName, body.Targets, true)
+	targets, err := normalizeScheduleTargets(body.TargetType, body.TargetID, body.TargetName, body.SelectedMounts, body.Targets, true)
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
 	}
@@ -221,12 +222,12 @@ func (s *Server) UpdateSchedule(c *fiber.Ctx) error {
 		sched.Name = v
 	}
 	if len(body.Targets) > 0 {
-		targets, err := normalizeScheduleTargets("", "", "", body.Targets, true)
+		targets, err := normalizeScheduleTargets("", "", "", nil, body.Targets, true)
 		if err != nil {
 			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
 		}
 		sched.SetTargets(targets)
-	} else if strings.TrimSpace(body.TargetType) != "" || strings.TrimSpace(body.TargetID) != "" || strings.TrimSpace(body.TargetName) != "" {
+	} else if strings.TrimSpace(body.TargetType) != "" || strings.TrimSpace(body.TargetID) != "" || strings.TrimSpace(body.TargetName) != "" || body.SelectedMounts != nil {
 		tType := strings.TrimSpace(body.TargetType)
 		if tType == "" {
 			tType = sched.TargetType
@@ -239,7 +240,13 @@ func (s *Server) UpdateSchedule(c *fiber.Ctx) error {
 		if tName == "" {
 			tName = tID
 		}
-		targets, err := normalizeScheduleTargets(tType, tID, tName, nil, true)
+		mounts := body.SelectedMounts
+		if mounts == nil {
+			if prev := sched.ResolvedTargets(); len(prev) == 1 {
+				mounts = prev[0].SelectedMounts
+			}
+		}
+		targets, err := normalizeScheduleTargets(tType, tID, tName, mounts, nil, true)
 		if err != nil {
 			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
 		}
@@ -490,15 +497,17 @@ func (s *Server) CloneSchedule(c *fiber.Ctx) error {
 
 func normalizeScheduleTargets(
 	targetType, targetID, targetName string,
+	selectedMounts []string,
 	rawTargets []models.ScheduleTarget,
 	requireOne bool,
 ) ([]models.ScheduleTarget, error) {
 	candidates := rawTargets
 	if len(candidates) == 0 && (strings.TrimSpace(targetType) != "" || strings.TrimSpace(targetID) != "") {
 		candidates = []models.ScheduleTarget{{
-			TargetType: targetType,
-			TargetID:   targetID,
-			TargetName: targetName,
+			TargetType:     targetType,
+			TargetID:       targetID,
+			TargetName:     targetName,
+			SelectedMounts: selectedMounts,
 		}}
 	}
 
@@ -522,10 +531,15 @@ func normalizeScheduleTargets(
 			continue
 		}
 		seen[key] = true
+		var mounts []string
+		if tType != "volume" {
+			mounts = models.NormalizeMountSelections(t.SelectedMounts)
+		}
 		out = append(out, models.ScheduleTarget{
-			TargetType: tType,
-			TargetID:   tID,
-			TargetName: tName,
+			TargetType:     tType,
+			TargetID:       tID,
+			TargetName:     tName,
+			SelectedMounts: mounts,
 		})
 	}
 	if requireOne && len(out) == 0 {

@@ -295,12 +295,22 @@ export function Schedules({
                         ).map((t) => (
                           <span
                             key={`${t.targetType}:${t.targetId}`}
+                            title={
+                              t.selectedMounts?.length
+                                ? `Included mounts: ${t.selectedMounts.join(', ')}`
+                                : 'All backupable mounts'
+                            }
                             className="inline-flex items-center gap-1 rounded-md border border-zinc-800 bg-zinc-950/70 px-2 py-0.5 text-xs text-zinc-200"
                           >
                             <Badge variant="info" className="text-[10px] py-0 px-1">
                               {t.targetType}
                             </Badge>
                             <span>{t.targetName}</span>
+                            {t.selectedMounts?.length > 0 && (
+                              <span className="font-mono text-[10px] text-sky-400">
+                                ({t.selectedMounts.length} vol{t.selectedMounts.length === 1 ? '' : 's'})
+                              </span>
+                            )}
                           </span>
                         ))}
                       </div>

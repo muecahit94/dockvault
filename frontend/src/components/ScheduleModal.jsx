@@ -27,6 +27,21 @@ function targetIcon(type) {
   return Container
 }
 
+function mountKey(m) {
+  return m.type === 'volume' && m.name ? m.name : m.source || m.name || m.destination
+}
+
+function mountLabel(m) {
+  return m.type === 'volume' ? m.name || m.source : m.source
+}
+
+function mountMatchesList(m, selectedMounts) {
+  if (!Array.isArray(selectedMounts)) return true
+  return selectedMounts.some(
+    (k) => k === m.source || (m.name && k === m.name) || k === m.destination,
+  )
+}
+
 export function ScheduleModal({
   open,
   onClose,
@@ -71,13 +86,21 @@ export function ScheduleModal({
     setTargetQuery('')
     if (existingSchedule) {
       const initialList = existingSchedule.targets?.length
-        ? existingSchedule.targets
+        ? existingSchedule.targets.map((t) => ({
+            targetType: t.targetType,
+            targetId: t.targetId,
+            targetName: t.targetName || t.targetId,
+            selectedMounts: t.selectedMounts?.length ? t.selectedMounts : null,
+          }))
         : existingSchedule.targetId
           ? [
               {
                 targetType: existingSchedule.targetType,
                 targetId: existingSchedule.targetId,
                 targetName: existingSchedule.targetName || existingSchedule.targetId,
+                selectedMounts: existingSchedule.selectedMounts?.length
+                  ? existingSchedule.selectedMounts
+                  : null,
               },
             ]
           : []
@@ -108,6 +131,7 @@ export function ScheduleModal({
           targetType: initialTarget.targetType,
           targetId: initialTarget.targetId,
           targetName: initialTarget.targetName || initialTarget.targetId,
+          selectedMounts: null,
         },
       ])
       setCronExpr(initialTarget.gitopsSchedule || '0 2 * * *')
@@ -133,11 +157,11 @@ export function ScheduleModal({
       const firstContainer = containers.find((c) => c.backupableCount > 0) || containers[0]
       const firstVol = volumes[0]
       const initialList = firstStack
-        ? [{ targetType: 'stack', targetId: firstStack.name, targetName: firstStack.name }]
+        ? [{ targetType: 'stack', targetId: firstStack.name, targetName: firstStack.name, selectedMounts: null }]
         : firstContainer
-          ? [{ targetType: 'container', targetId: firstContainer.name, targetName: firstContainer.name }]
+          ? [{ targetType: 'container', targetId: firstContainer.name, targetName: firstContainer.name, selectedMounts: null }]
           : firstVol
-            ? [{ targetType: 'volume', targetId: firstVol.name, targetName: firstVol.name }]
+            ? [{ targetType: 'volume', targetId: firstVol.name, targetName: firstVol.name, selectedMounts: null }]
             : []
       setName(initialList[0] ? `${initialList[0].targetName} Backup` : '')
       setSelectedTargets(initialList)
@@ -184,11 +208,32 @@ export function ScheduleModal({
     [selectedTargets],
   )
 
+  const selectedStackNames = useMemo(
+    () =>
+      new Set(
+        selectedTargets
+          .filter((t) => t.targetType === 'stack')
+          .map((t) => t.targetId),
+      ),
+    [selectedTargets],
+  )
+
+  const containerProjectByKey = useMemo(() => {
+    const map = new Map()
+    for (const c of containers) {
+      if (!c.composeProject) continue
+      map.set(`container:${c.name}`, c.composeProject)
+      if (c.id) map.set(`container:${c.id}`, c.composeProject)
+    }
+    return map
+  }, [containers])
+
   const allAvailableTargets = useMemo(() => {
     const stackItems = stacks.map((s) => ({
       targetType: 'stack',
       targetId: s.name,
       targetName: s.name,
+      composeProject: '',
       meta: `${s.runningCount}/${s.totalCount} running · ${s.backupableCount} mounts`,
     }))
     const containerItems = containers
@@ -202,12 +247,14 @@ export function ScheduleModal({
         targetType: 'container',
         targetId: c.name,
         targetName: c.name,
+        composeProject: c.composeProject || '',
         meta: `${c.state} · ${c.backupableCount} mounts${c.composeProject ? ` · ${c.composeProject}` : ''}`,
       }))
     const volumeItems = volumes.map((v) => ({
       targetType: 'volume',
       targetId: v.name,
       targetName: v.name,
+      composeProject: '',
       meta: v.inUse ? 'attached' : 'orphan',
     }))
     return [...stackItems, ...containerItems, ...volumeItems]
@@ -226,28 +273,63 @@ export function ScheduleModal({
     })
   }, [allAvailableTargets, targetFilterType, targetQuery])
 
+  const mountsByTargetKey = useMemo(() => {
+    const map = new Map()
+    for (const s of stacks) {
+      map.set(`stack:${s.name}`, s.uniqueMounts || [])
+    }
+    for (const c of containers) {
+      const mList = (c.mounts || []).filter((m) => m.backupable)
+      map.set(`container:${c.name}`, mList)
+      if (c.id) map.set(`container:${c.id}`, mList)
+    }
+    return map
+  }, [stacks, containers])
+
   function toggleTarget(item) {
     const key = targetKey(item)
-    setSelectedTargets((prev) =>
-      prev.some((p) => targetKey(p) === key)
-        ? prev.filter((p) => targetKey(p) !== key)
-        : [
-            ...prev,
-            {
-              targetType: item.targetType,
-              targetId: item.targetId,
-              targetName: item.targetName,
-            },
-          ],
-    )
+    setSelectedTargets((prev) => {
+      if (prev.some((p) => targetKey(p) === key)) {
+        return prev.filter((p) => targetKey(p) !== key)
+      }
+      if (
+        item.targetType === 'container' &&
+        item.composeProject &&
+        prev.some((p) => p.targetType === 'stack' && p.targetId === item.composeProject)
+      ) {
+        return prev
+      }
+      const next =
+        item.targetType === 'stack'
+          ? prev.filter(
+              (p) =>
+                p.targetType !== 'container' ||
+                containerProjectByKey.get(targetKey(p)) !== item.targetId,
+            )
+          : prev
+      return [
+        ...next,
+        {
+          targetType: item.targetType,
+          targetId: item.targetId,
+          targetName: item.targetName,
+          selectedMounts: null,
+        },
+      ]
+    })
   }
 
   function selectAllStacks() {
     setSelectedTargets((prev) => {
-      const next = [...prev]
-      const seen = new Set(prev.map(targetKey))
+      const allStackIds = new Set(stacks.map((s) => s.name))
+      const next = prev.filter(
+        (p) =>
+          p.targetType !== 'container' ||
+          !allStackIds.has(containerProjectByKey.get(targetKey(p))),
+      )
+      const seen = new Set(next.map(targetKey))
       for (const s of stacks) {
-        const t = { targetType: 'stack', targetId: s.name, targetName: s.name }
+        const t = { targetType: 'stack', targetId: s.name, targetName: s.name, selectedMounts: null }
         const key = targetKey(t)
         if (!seen.has(key)) {
           seen.add(key)
@@ -258,9 +340,49 @@ export function ScheduleModal({
     })
   }
 
+  function toggleMountForTarget(targetItem, mount, allMounts) {
+    const tKey = targetKey(targetItem)
+    const clickedKey = mountKey(mount)
+    setSelectedTargets((prev) =>
+      prev.map((t) => {
+        if (targetKey(t) !== tKey) return t
+        const currentKeys = allMounts
+          .filter((m) => mountMatchesList(m, t.selectedMounts))
+          .map(mountKey)
+        const nextKeys = currentKeys.includes(clickedKey)
+          ? currentKeys.filter((k) => k !== clickedKey)
+          : [...currentKeys, clickedKey]
+        const nextAll =
+          nextKeys.length >= allMounts.length &&
+          allMounts.every((m) => nextKeys.includes(mountKey(m)))
+        return {
+          ...t,
+          selectedMounts: nextAll ? null : nextKeys,
+        }
+      }),
+    )
+  }
+
+  function setAllMountsForTarget(targetItem, selectAll) {
+    const tKey = targetKey(targetItem)
+    setSelectedTargets((prev) =>
+      prev.map((t) =>
+        targetKey(t) === tKey ? { ...t, selectedMounts: selectAll ? null : [] } : t,
+      ),
+    )
+  }
+
   const activePrimaryId = storageProviderId || String(defaultProvider?.id || '')
   const hasContainerOrStack =
     selectedTargets.length === 0 || selectedTargets.some((t) => t.targetType !== 'volume')
+
+  const targetsWithMounts = selectedTargets
+    .filter((t) => t.targetType !== 'volume')
+    .map((t) => ({
+      target: t,
+      mounts: mountsByTargetKey.get(targetKey(t)) || [],
+    }))
+    .filter((entry) => entry.mounts.length > 0)
 
   async function handleSubmit(e) {
     e.preventDefault()
@@ -268,18 +390,32 @@ export function ScheduleModal({
       notify('error', 'Select at least one stack, container, or volume')
       return
     }
+    for (const entry of targetsWithMounts) {
+      if (Array.isArray(entry.target.selectedMounts) && entry.target.selectedMounts.length === 0) {
+        notify('error', `Select at least one volume or mount for "${entry.target.targetName}"`)
+        return
+      }
+    }
     setSaving(true)
     try {
+      const normalizedTargets = selectedTargets.map((t) => ({
+        targetType: t.targetType,
+        targetId: t.targetId,
+        targetName: t.targetName,
+        ...(Array.isArray(t.selectedMounts) && t.selectedMounts.length > 0
+          ? { selectedMounts: t.selectedMounts }
+          : {}),
+      }))
       const defaultName =
-        selectedTargets.length === 1
-          ? `${selectedTargets[0].targetName} Backup`
-          : `${selectedTargets.length} Targets Backup`
+        normalizedTargets.length === 1
+          ? `${normalizedTargets[0].targetName} Backup`
+          : `${normalizedTargets.length} Targets Backup`
       const payload = {
         name: name.trim() || defaultName,
-        targetType: selectedTargets[0].targetType,
-        targetId: selectedTargets[0].targetId,
-        targetName: selectedTargets[0].targetName,
-        targets: selectedTargets,
+        targetType: normalizedTargets[0].targetType,
+        targetId: normalizedTargets[0].targetId,
+        targetName: normalizedTargets[0].targetName,
+        targets: normalizedTargets,
         cronExpr: cronExpr.trim(),
         storageProviderId: Number(activePrimaryId) || 0,
         secondaryStorageId: secondaryStorageId ? Number(secondaryStorageId) : 0,
@@ -422,21 +558,35 @@ export function ScheduleModal({
             ) : (
               filteredTargets.map((item) => {
                 const key = targetKey(item)
-                const checked = selectedKeySet.has(key)
+                const coveredByStack =
+                  item.targetType === 'container' &&
+                  Boolean(item.composeProject) &&
+                  selectedStackNames.has(item.composeProject)
+                const checked = selectedKeySet.has(key) || coveredByStack
                 const Icon = targetIcon(item.targetType)
                 return (
                   <label
                     key={key}
-                    className={`flex items-center justify-between gap-2 rounded-lg px-2 py-1.5 text-xs cursor-pointer transition-colors ${
-                      checked ? 'bg-sky-500/10 text-zinc-100' : 'hover:bg-zinc-900 text-zinc-300'
+                    title={
+                      coveredByStack
+                        ? `Already included via stack "${item.composeProject}". Unselect the stack to pick individual containers.`
+                        : undefined
+                    }
+                    className={`flex items-center justify-between gap-2 rounded-lg px-2 py-1.5 text-xs transition-colors ${
+                      coveredByStack
+                        ? 'bg-sky-500/5 text-zinc-400 opacity-75 cursor-not-allowed'
+                        : checked
+                          ? 'bg-sky-500/10 text-zinc-100 cursor-pointer'
+                          : 'hover:bg-zinc-900 text-zinc-300 cursor-pointer'
                     }`}
                   >
                     <span className="flex items-center gap-2 min-w-0">
                       <input
                         type="checkbox"
                         checked={checked}
-                        onChange={() => toggleTarget(item)}
-                        className="h-3.5 w-3.5 accent-sky-500 cursor-pointer shrink-0"
+                        disabled={coveredByStack}
+                        onChange={() => !coveredByStack && toggleTarget(item)}
+                        className="h-3.5 w-3.5 accent-sky-500 cursor-pointer disabled:cursor-not-allowed shrink-0"
                       />
                       <Icon
                         className={`h-3.5 w-3.5 shrink-0 ${
@@ -451,6 +601,11 @@ export function ScheduleModal({
                       <Badge variant="neutral" className="text-[10px] py-0 px-1.5">
                         {item.targetType}
                       </Badge>
+                      {coveredByStack && (
+                        <Badge variant="info" className="text-[10px] py-0 px-1.5">
+                          via {item.composeProject}
+                        </Badge>
+                      )}
                     </span>
                     <span className="shrink-0 font-mono text-[10px] text-zinc-500">
                       {item.meta}
@@ -461,6 +616,89 @@ export function ScheduleModal({
             )}
           </div>
         </div>
+
+        {targetsWithMounts.length > 0 && (
+          <div className="space-y-2.5 rounded-xl border border-zinc-800 bg-zinc-950/60 p-3">
+            <div className="flex items-center justify-between gap-2">
+              <Label className="mb-0 flex items-center gap-1.5">
+                <HardDrive className="h-3.5 w-3.5 text-sky-400" />
+                Included Volumes &amp; Mounts
+              </Label>
+              <span className="text-[11px] text-zinc-400">
+                Leave all checked to automatically include new volumes too
+              </span>
+            </div>
+
+            <div className="max-h-52 space-y-2.5 overflow-y-auto pr-1">
+              {targetsWithMounts.map(({ target, mounts }) => {
+                const Icon = targetIcon(target.targetType)
+                const checkedCount = mounts.filter((m) =>
+                  mountMatchesList(m, target.selectedMounts),
+                ).length
+                const allIncluded = !Array.isArray(target.selectedMounts)
+                return (
+                  <div
+                    key={targetKey(target)}
+                    className="rounded-lg border border-zinc-800/80 bg-zinc-900/50 p-2.5 space-y-1.5"
+                  >
+                    <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
+                      <span className="flex items-center gap-1.5 font-medium text-zinc-200">
+                        <Icon
+                          className={`h-3.5 w-3.5 ${
+                            target.targetType === 'stack' ? 'text-violet-400' : 'text-sky-400'
+                          }`}
+                        />
+                        <span>{target.targetName}</span>
+                        <Badge variant={allIncluded ? 'neutral' : 'info'} className="text-[10px]">
+                          {allIncluded
+                            ? `All ${mounts.length} mounts`
+                            : `${checkedCount}/${mounts.length} selected`}
+                        </Badge>
+                      </span>
+                      {mounts.length > 1 && (
+                        <button
+                          type="button"
+                          onClick={() => setAllMountsForTarget(target, checkedCount < mounts.length)}
+                          className="text-[11px] text-sky-400 hover:text-sky-300 cursor-pointer"
+                        >
+                          {checkedCount === mounts.length ? 'Clear all' : 'Select all'}
+                        </button>
+                      )}
+                    </div>
+
+                    <div className="space-y-1">
+                      {mounts.map((m, idx) => {
+                        const key = mountKey(m)
+                        const checked = mountMatchesList(m, target.selectedMounts)
+                        return (
+                          <label
+                            key={`${targetKey(target)}-${key}-${idx}`}
+                            className="flex items-center justify-between gap-2 rounded-md border border-zinc-800/70 bg-zinc-950/60 px-2 py-1 text-xs cursor-pointer hover:border-zinc-700"
+                          >
+                            <span className="flex items-center gap-2 min-w-0">
+                              <input
+                                type="checkbox"
+                                checked={checked}
+                                onChange={() => toggleMountForTarget(target, m, mounts)}
+                                className="h-3.5 w-3.5 accent-sky-500 cursor-pointer shrink-0"
+                              />
+                              <span className="truncate font-mono text-zinc-200">
+                                {mountLabel(m)}
+                              </span>
+                            </span>
+                            <span className="ml-2 shrink-0 text-[11px] text-zinc-400">
+                              → {m.destination}
+                            </span>
+                          </label>
+                        )
+                      })}
+                    </div>
+                  </div>
+                )
+              })}
+            </div>
+          </div>
+        )}
 
         <div>
           <div className="flex items-center justify-between mb-1.5">

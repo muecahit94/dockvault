@@ -39,7 +39,12 @@ function scheduleListFor(map, ...keys) {
   return out
 }
 
-function SchedulePill({ schedule, viaStack = '', onEdit }) {
+function SchedulePill({ schedule, viaStack = '', targetName = '', onEdit }) {
+  const matchedTarget = (schedule.targets || []).find(
+    (t) =>
+      (viaStack ? t.targetType === 'stack' && (t.targetId === viaStack || t.targetName === viaStack) : t.targetId === targetName || t.targetName === targetName),
+  )
+  const mountCount = matchedTarget?.selectedMounts?.length || 0
   const titleParts = [
     schedule.name,
     `Cron: ${schedule.cronExpr}`,
@@ -49,6 +54,7 @@ function SchedulePill({ schedule, viaStack = '', onEdit }) {
         : 'Enabled'
       : 'Paused',
     viaStack ? `Inherited from stack "${viaStack}"` : '',
+    mountCount > 0 ? `Selected volumes: ${matchedTarget.selectedMounts.join(', ')}` : '',
   ].filter(Boolean)
 
   return (
@@ -69,6 +75,9 @@ function SchedulePill({ schedule, viaStack = '', onEdit }) {
           {schedule.name}
         </span>
         <span className="font-mono text-[10px] opacity-90">{schedule.cronExpr}</span>
+        {mountCount > 0 && (
+          <span className="text-[10px] opacity-90">({mountCount} vol)</span>
+        )}
         {!schedule.enabled && <span className="opacity-90">(Paused)</span>}
       </Badge>
     </button>
@@ -278,6 +287,7 @@ export function Containers({
                             <SchedulePill
                               key={sched.id}
                               schedule={sched}
+                              targetName={stack.name}
                               onEdit={(s) => onOpenSchedule(null, s)}
                             />
                           ))
@@ -386,6 +396,7 @@ export function Containers({
                                   <SchedulePill
                                     key={sched.id}
                                     schedule={sched}
+                                    targetName={c.name}
                                     onEdit={(s) => onOpenSchedule(null, s)}
                                   />
                                 ))}
@@ -533,6 +544,7 @@ export function Containers({
                                   <SchedulePill
                                     key={sched.id}
                                     schedule={sched}
+                                    targetName={c.name}
                                     onEdit={(s) => onOpenSchedule(null, s)}
                                   />
                                 ))}

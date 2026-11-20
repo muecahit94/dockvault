@@ -135,6 +135,7 @@ func (m *Manager) runSchedule(scheduleID uint) {
 			StorageProviderID:  sched.StorageProviderID,
 			SecondaryStorageID: sched.SecondaryStorageID,
 			PauseContainer:     sched.PauseContainer,
+			SelectedMounts:     tgt.SelectedMounts,
 			PreCommand:         sched.PreCommand,
 			PostCommand:        sched.PostCommand,
 			ExcludePatterns:    docker.ParseExcludePatterns(sched.ExcludePatterns),
