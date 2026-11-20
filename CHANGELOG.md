@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.0](https://github.com/muecahit94/dockvault/compare/v0.5.0...v0.6.0) (2026-11-20)
+
+
+### Features
+
+* add support for selective mount backups in schedule targets ([dc92fde](https://github.com/muecahit94/dockvault/commit/dc92fdeedef9c75f46c13a07041cabf79b58033f))
+
 ## [0.5.0](https://github.com/muecahit94/dockvault/compare/v0.4.1...v0.5.0) (2026-11-18)
 
 
